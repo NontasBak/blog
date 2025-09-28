@@ -2,7 +2,9 @@ import { notFound } from "next/navigation";
 import Link from "next/link";
 import defaultMdxComponents from "fumadocs-ui/mdx";
 import { blog } from "@/lib/source";
-import { TableOfContents } from "@/components/toc";
+import { TOCProvider, TOCScrollArea } from "@/components/ui/toc";
+import ClerkTOCItems from "@/components/ui/toc-clerk";
+import { CollapsibleTOC } from "@/components/ui/collapsible-toc";
 import type { Metadata } from "next";
 
 export default async function Page(props: { params: Promise<{ slug: string }> }) {
@@ -19,14 +21,18 @@ export default async function Page(props: { params: Promise<{ slug: string }> })
         <p className="mb-4 text-fd-muted-foreground">{page.data.description}</p>
         <Link href="/blog">Back</Link>
       </div>
+      {/*<CollapsibleTOC toc={page.data.toc} />*/}
       <div className="container flex px-4 py-8 gap-8">
         <aside className="hidden lg:block w-64 shrink-0">
-          <TableOfContents items={page.data.toc} />
+          <div className="sticky top-16">
+            <TOCProvider toc={page.data.toc}>
+              <TOCScrollArea>
+                <ClerkTOCItems />
+              </TOCScrollArea>
+            </TOCProvider>
+          </div>
         </aside>
         <article className="flex flex-col min-w-0 flex-1">
-          <div className="lg:hidden mb-6">
-            <TableOfContents items={page.data.toc} />
-          </div>
           <div className="prose min-w-0">
             <Mdx components={defaultMdxComponents} />
           </div>

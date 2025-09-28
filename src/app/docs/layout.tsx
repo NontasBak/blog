@@ -1,4 +1,4 @@
-import { DocsLayout } from "fumadocs-ui/layouts/docs";
+import { DocsLayout } from "@/components/layout/docs";
 import { baseOptions } from "@/lib/layout.shared";
 import { source } from "@/lib/source";
 
@@ -8,7 +8,7 @@ export default function Layout({ children }: LayoutProps<"/docs">) {
       tree={source.pageTree}
       {...baseOptions()}
       sidebar={{
-        enabled: false,
+        enabled: true,
       }}
     >
       {children}
