@@ -6,6 +6,7 @@ import { TOCProvider, TOCScrollArea } from "@/components/ui/toc";
 import ClerkTOCItems from "@/components/ui/toc-clerk";
 import { CollapsibleTOC } from "@/components/ui/collapsible-toc";
 import type { Metadata } from "next";
+import { ArrowLeft } from "lucide-react";
 
 export default async function Page(props: { params: Promise<{ slug: string }> }) {
   const params = await props.params;
@@ -16,10 +17,36 @@ export default async function Page(props: { params: Promise<{ slug: string }> })
 
   return (
     <>
-      <div className="container rounded-xl border py-12 md:px-8">
-        <h1 className="mb-2 text-3xl font-bold">{page.data.title}</h1>
-        <p className="mb-4 text-fd-muted-foreground">{page.data.description}</p>
-        <Link href="/blog">Back</Link>
+      <div className="container border-2 border-fd-primary rounded-xl text-fd-accent-foreground py-16 md:px-12 mt-8">
+        <div className="space-y-6">
+          <h1 className="text-5xl md:text-6xl font-bold leading-tight">{page.data.title}</h1>
+          <div className="flex flex-col sm:flex-row items-start gap-2 sm:gap-6 text-lg text-fd-secondary-foreground/80">
+            <div className="flex items-center gap-2">
+              <span className="text-sm uppercase tracking-wide font-medium">By</span>
+              <span className="font-semibold text-fd-secondary-foreground">{page.data.author}</span>
+            </div>
+            <div className="hidden sm:block w-1 h-1 rounded-full bg-primary-foreground/60"></div>
+            <div className="flex items-center gap-2">
+              <span className="text-sm uppercase tracking-wide font-medium">Published</span>
+              <time className="font-semibold text-primary-foreground">
+                {new Date(page.data.date).toLocaleDateString("en-US", {
+                  year: "numeric",
+                  month: "long",
+                  day: "numeric",
+                })}
+              </time>
+            </div>
+          </div>
+        </div>
+        <div className="mt-8">
+          <Link
+            href="/blog"
+            className="inline-flex items-center text-sm font-medium text-primary-foreground/70 hover:text-primary-foreground transition-colors"
+          >
+            <ArrowLeft className="w-4 h-4 mr-2" />
+            Back to Blog
+          </Link>
+        </div>
       </div>
       {/*<CollapsibleTOC toc={page.data.toc} />*/}
       <div className="container flex px-4 py-8 gap-8">
@@ -35,16 +62,6 @@ export default async function Page(props: { params: Promise<{ slug: string }> })
         <article className="flex flex-col min-w-0 flex-1">
           <div className="prose min-w-0">
             <Mdx components={defaultMdxComponents} />
-          </div>
-          <div className="flex flex-col gap-4 text-sm mt-8">
-            <div>
-              <p className="mb-1 text-fd-muted-foreground">Written by</p>
-              <p className="font-medium">{page.data.author}</p>
-            </div>
-            <div>
-              <p className="mb-1 text-sm text-fd-muted-foreground">At</p>
-              <p className="font-medium">{new Date(page.data.date).toDateString()}</p>
-            </div>
           </div>
         </article>
       </div>
