@@ -24,10 +24,10 @@ export default async function Page(props: { params: Promise<{ slug: string }> })
           </div>
           <div className="relative z-10 border-b-2 text-fd-accent-foreground py-16 md:px-12">
             <div className="space-y-6">
-              <h1 className="container text-5xl md:text-6xl leading-tight font-lora text-fd-primary">
+              <h1 className="container max-w-7xl text-5xl md:text-6xl leading-tight font-lora text-fd-primary">
                 {page.data.title}
               </h1>
-              <div className="container flex flex-col sm:flex-row items-start gap-2 sm:gap-6 text-lg text-fd-secondary-foreground/80">
+              <div className="container max-w-7xl flex flex-col sm:flex-row items-start gap-2 sm:gap-6 text-lg text-fd-secondary-foreground/80">
                 <div className="flex items-center gap-2">
                   <span className="text-sm uppercase tracking-wide font-medium">By</span>
                   <span className="font-semibold text-fd-primary">{page.data.author}</span>
@@ -45,7 +45,7 @@ export default async function Page(props: { params: Promise<{ slug: string }> })
                 </div>
               </div>
             </div>
-            <div className="mt-8 container">
+            <div className="mt-8 container max-w-7xl">
               <Link
                 href="/blog"
                 className="inline-flex items-center text-sm font-medium text-primary-foreground/70 hover:text-primary-foreground transition-colors"
@@ -56,7 +56,7 @@ export default async function Page(props: { params: Promise<{ slug: string }> })
             </div>
           </div>
           {/*<CollapsibleTOC toc={page.data.toc} />*/}
-          <div className="relative z-10 container flex px-4 py-8 gap-8">
+          <div className="relative z-10 container max-w-7xl mx-auto flex px-4 py-8 gap-8">
             <aside className="hidden lg:block w-64 shrink-0">
               <div className="sticky top-16">
                 <TOCProvider toc={page.data.toc}>

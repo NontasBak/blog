@@ -27,7 +27,6 @@ export default function Layout({ children }: LayoutProps<"/">) {
           secondary: false,
         },
       ]}
-      
     >
       {children}
     </HomeLayout>
