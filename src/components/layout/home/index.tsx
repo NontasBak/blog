@@ -1,12 +1,7 @@
-import { Fragment, type HTMLAttributes, useMemo } from 'react';
-import { cn } from '../../../lib/cn';
-import {
-  type BaseLayoutProps,
-  getLinks,
-  type LinkItemType,
-  type NavOptions,
-} from '../shared/index';
-import { NavProvider } from 'fumadocs-ui/contexts/layout';
+import { Fragment, type HTMLAttributes, useMemo } from "react";
+import { cn } from "../../../lib/cn";
+import { type BaseLayoutProps, getLinks, type LinkItemType, type NavOptions } from "../shared/index";
+import { NavProvider } from "fumadocs-ui/contexts/layout";
 import {
   Navbar,
   NavbarLink,
@@ -14,25 +9,14 @@ import {
   NavbarMenuContent,
   NavbarMenuLink,
   NavbarMenuTrigger,
-} from './navbar';
-import {
-  LargeSearchToggle,
-  SearchToggle,
-} from '../../search-toggle';
-import { ThemeToggle } from '../../theme-toggle';
-import {
-  LanguageToggle,
-  LanguageToggleText,
-} from '../../language-toggle';
-import { ChevronDown, Languages } from 'lucide-react';
-import Link from 'fumadocs-core/link';
-import {
-  Menu,
-  MenuContent,
-  MenuLinkItem,
-  MenuTrigger,
-} from './menu';
-import { buttonVariants } from '../../ui/button';
+} from "./navbar";
+import { LargeSearchToggle, SearchToggle } from "../../search-toggle";
+import { ThemeToggle } from "../../theme-toggle";
+import { LanguageToggle, LanguageToggleText } from "../../language-toggle";
+import { ChevronDown, Languages } from "lucide-react";
+import Link from "fumadocs-core/link";
+import { Menu, MenuContent, MenuLinkItem, MenuTrigger } from "./menu";
+import { buttonVariants } from "../../ui/button";
 
 export interface HomeLayoutProps extends BaseLayoutProps {
   nav?: Partial<
@@ -45,9 +29,7 @@ export interface HomeLayoutProps extends BaseLayoutProps {
   >;
 }
 
-export function HomeLayout(
-  props: HomeLayoutProps & HTMLAttributes<HTMLElement>,
-) {
+export function HomeLayout(props: HomeLayoutProps & HTMLAttributes<HTMLElement>) {
   const {
     nav = {},
     links,
@@ -61,11 +43,7 @@ export function HomeLayout(
 
   return (
     <NavProvider transparentMode={nav?.transparentMode}>
-      <main
-        id="nd-home-layout"
-        {...rest}
-        className={cn('flex flex-1 flex-col pt-14', rest.className)}
-      >
+      <main id="nd-home-layout" {...rest} className={cn("flex flex-1 flex-col pt-14", rest.className)}>
         {nav.enabled !== false &&
           (nav.component ?? (
             <Header
@@ -91,24 +69,14 @@ export function Header({
   themeSwitch = {},
   searchToggle = {},
 }: HomeLayoutProps) {
-  const finalLinks = useMemo(
-    () => getLinks(links, githubUrl),
-    [links, githubUrl],
-  );
+  const finalLinks = useMemo(() => getLinks(links, githubUrl), [links, githubUrl]);
 
-  const navItems = finalLinks.filter((item) =>
-    ['nav', 'all'].includes(item.on ?? 'all'),
-  );
-  const menuItems = finalLinks.filter((item) =>
-    ['menu', 'all'].includes(item.on ?? 'all'),
-  );
+  const navItems = finalLinks.filter((item) => ["nav", "all"].includes(item.on ?? "all"));
+  const menuItems = finalLinks.filter((item) => ["menu", "all"].includes(item.on ?? "all"));
 
   return (
     <Navbar>
-      <Link
-        href={nav.url ?? '/'}
-        className="inline-flex items-center gap-2.5 font-semibold"
-      >
+      <Link href={nav.url ?? "/"} className="inline-flex items-center gap-2.5 font-semibold text-lg">
         {nav.title}
       </Link>
       {nav.children}
@@ -122,13 +90,9 @@ export function Header({
       <div className="flex flex-row items-center justify-end gap-1.5 flex-1 max-lg:hidden">
         {searchToggle.enabled !== false &&
           (searchToggle.components?.lg ?? (
-            <LargeSearchToggle
-              className="w-full rounded-full ps-2.5 max-w-[240px]"
-              hideIfDisabled
-            />
+            <LargeSearchToggle className="w-full rounded-full ps-2.5 max-w-[240px]" hideIfDisabled />
           ))}
-        {themeSwitch.enabled !== false &&
-          (themeSwitch.component ?? <ThemeToggle mode={themeSwitch?.mode} />)}
+        {themeSwitch.enabled !== false && (themeSwitch.component ?? <ThemeToggle mode={themeSwitch?.mode} />)}
         {i18n ? (
           <LanguageToggle>
             <Languages className="size-5" />
@@ -142,17 +106,15 @@ export function Header({
       </div>
       <ul className="flex flex-row items-center ms-auto -me-1.5 lg:hidden">
         {searchToggle.enabled !== false &&
-          (searchToggle.components?.sm ?? (
-            <SearchToggle className="p-2" hideIfDisabled />
-          ))}
+          (searchToggle.components?.sm ?? <SearchToggle className="p-2" hideIfDisabled />)}
         <Menu>
           <MenuTrigger
             aria-label="Toggle Menu"
             className={cn(
               buttonVariants({
-                size: 'icon',
-                color: 'ghost',
-                className: 'group',
+                size: "icon",
+                color: "ghost",
+                className: "group",
               }),
             )}
             enableHover={nav.enableHoverToOpen}
@@ -178,9 +140,7 @@ export function Header({
                 </LanguageToggle>
               ) : null}
               {themeSwitch.enabled !== false &&
-                (themeSwitch.component ?? (
-                  <ThemeToggle mode={themeSwitch?.mode} />
-                ))}
+                (themeSwitch.component ?? <ThemeToggle mode={themeSwitch?.mode} />)}
             </div>
           </MenuContent>
         </Menu>
@@ -189,44 +149,29 @@ export function Header({
   );
 }
 
-function NavbarLinkItem({
-  item,
-  ...props
-}: {
-  item: LinkItemType;
-  className?: string;
-}) {
-  if (item.type === 'custom') return <div {...props}>{item.children}</div>;
+function NavbarLinkItem({ item, ...props }: { item: LinkItemType; className?: string }) {
+  if (item.type === "custom") return <div {...props}>{item.children}</div>;
 
-  if (item.type === 'menu') {
+  if (item.type === "menu") {
     const children = item.items.map((child, j) => {
-      if (child.type === 'custom') {
+      if (child.type === "custom") {
         return <Fragment key={j}>{child.children}</Fragment>;
       }
 
       const {
         banner = child.icon ? (
-          <div className="w-fit rounded-md border bg-fd-muted p-1 [&_svg]:size-4">
-            {child.icon}
-          </div>
+          <div className="w-fit rounded-md border bg-fd-muted p-1 [&_svg]:size-4">{child.icon}</div>
         ) : null,
         ...rest
       } = child.menu ?? {};
 
       return (
-        <NavbarMenuLink
-          key={`${j}-${child.url}`}
-          href={child.url}
-          external={child.external}
-          {...rest}
-        >
+        <NavbarMenuLink key={`${j}-${child.url}`} href={child.url} external={child.external} {...rest}>
           {rest.children ?? (
             <>
               {banner}
               <p className="text-[15px] font-medium">{child.text}</p>
-              <p className="text-sm text-fd-muted-foreground empty:hidden">
-                {child.description}
-              </p>
+              <p className="text-sm text-fd-muted-foreground empty:hidden">{child.description}</p>
             </>
           )}
         </NavbarMenuLink>
@@ -254,15 +199,15 @@ function NavbarLinkItem({
       {...props}
       item={item}
       variant={item.type}
-      aria-label={item.type === 'icon' ? item.label : undefined}
+      aria-label={item.type === "icon" ? item.label : undefined}
     >
-      {item.type === 'icon' ? item.icon : item.text}
+      {item.type === "icon" ? item.icon : item.text}
     </NavbarLink>
   );
 }
 
 function isSecondary(item: LinkItemType): boolean {
-  if ('secondary' in item && item.secondary != null) return item.secondary;
+  if ("secondary" in item && item.secondary != null) return item.secondary;
 
-  return item.type === 'icon';
+  return item.type === "icon";
 }
