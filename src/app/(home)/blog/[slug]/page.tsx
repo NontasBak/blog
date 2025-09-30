@@ -34,7 +34,7 @@ export default async function Page(props: { params: Promise<{ slug: string }> })
               <div className="hidden sm:block w-1 h-1 rounded-full bg-primary-foreground/60"></div>
               <div className="flex items-center gap-2">
                 <span className="text-sm uppercase tracking-wide font-medium">Published</span>
-                <time className="font-semibold text-primary-foreground">
+                <time className="font-semibold text-fd-card-foreground">
                   {new Date(page.data.date).toLocaleDateString("en-US", {
                     year: "numeric",
                     month: "long",
@@ -47,7 +47,7 @@ export default async function Page(props: { params: Promise<{ slug: string }> })
           <div className="mt-8 container max-w-7xl">
             <Link
               href="/blog"
-              className="inline-flex items-center text-sm font-medium text-primary-foreground/70 hover:text-primary-foreground transition-colors"
+              className="inline-flex items-center text-sm font-medium text-fd-card-foreground/70 hover:text-fd-card-foreground transition-colors"
             >
               <ArrowLeft className="w-4 h-4 mr-2" />
               Back to Blog
