@@ -60,7 +60,7 @@ export default async function Page(props: { params: Promise<{ slug: string }> })
             <aside className="hidden lg:block w-64 shrink-0">
               <div className="sticky top-16">
                 <TOCProvider toc={page.data.toc}>
-                  <TOCScrollArea>
+                  <TOCScrollArea className="h-[calc(100vh-4rem)] overflow-auto">
                     <ClerkTOCItems />
                   </TOCScrollArea>
                 </TOCProvider>
