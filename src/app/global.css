@@ -38,8 +38,8 @@
 }
 
 @theme {
-    --font-lilex: "Lilex", monospace;
-    --font-lora: "Lora", serif;
+    --font-lilex: var(--font-lilex);
+    --font-lora: var(--font-lora);
 }
 
 @theme inline {
