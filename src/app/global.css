@@ -5,38 +5,6 @@
 
 @custom-variant dark (&:is(.dark *));
 
-@font-face {
-    font-family: "Lilex";
-    font-style: normal;
-    font-weight: 100 900;
-    font-display: swap;
-    src: url("/fonts/Lilex-Variable.ttf") format("truetype");
-}
-
-@font-face {
-    font-family: "Lilex";
-    font-style: italic;
-    font-weight: 100 900;
-    font-display: swap;
-    src: url("/fonts/Lilex-Italic-Variable.ttf") format("truetype");
-}
-
-@font-face {
-    font-family: "Lora";
-    font-style: normal;
-    font-weight: 100 900;
-    font-display: swap;
-    src: url("/fonts/Lora-Variable.ttf") format("truetype");
-}
-
-@font-face {
-    font-family: "Lora";
-    font-style: italic;
-    font-weight: 100 900;
-    font-display: swap;
-    src: url("/fonts/Lora-Italic-Variable.ttf") format("truetype");
-}
-
 @theme {
     --font-lilex: var(--font-lilex);
     --font-lora: var(--font-lora);
