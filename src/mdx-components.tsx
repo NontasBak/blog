@@ -12,7 +12,7 @@ export function getMDXComponents(components?: MDXComponents): MDXComponents {
         <Pre>{props.children}</Pre>
       </CodeBlock>
     ),
-    img: (props) => <ImageZoom {...(props as any)} />,
+    img: (props) => <ImageZoom {...props} />,
     ...components,
   };
 }
