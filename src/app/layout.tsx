@@ -9,13 +9,13 @@ const inter = Inter({
 
 const lilex = localFont({
   src: "../../public/fonts/Lilex-Variable.ttf",
-  display: "swap",
+  display: "block",
   variable: "--font-lilex",
 });
 
 const lora = localFont({
   src: "../../public/fonts/Lora-Variable.ttf",
-  display: "swap",
+  display: "block",
   variable: "--font-lora",
 });
 
