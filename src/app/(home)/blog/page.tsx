@@ -10,13 +10,18 @@ import {
   PaginationNext,
   PaginationPrevious,
 } from "@/components/shadcn/ui/pagination";
+import type { Metadata } from "next";
 
 interface HomeProps {
   searchParams: Promise<{ page?: string }>;
 }
 
 export default async function Home({ searchParams }: HomeProps) {
-  const posts = blog.getPages();
+  const posts = blog.getPages().sort((a, b) => {
+    const dateA = new Date(a.data.date);
+    const dateB = new Date(b.data.date);
+    return dateB.getTime() - dateA.getTime(); // Most recent first
+  });
   const resolvedSearchParams = await searchParams;
   const currentPage = Number(resolvedSearchParams.page) || 1;
   const postsPerPage = 5;
@@ -105,4 +110,11 @@ export default async function Home({ searchParams }: HomeProps) {
       </main>
     </div>
   );
+}
+
+export async function generateMetadata(props: { params: Promise<{ slug: string }> }): Promise<Metadata> {
+  return {
+    title: "Blog Posts - Nontas Bak",
+    description: "Blog posts from Nontas Bakoulas",
+  };
 }

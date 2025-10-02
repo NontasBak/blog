@@ -1,4 +1,5 @@
 import Link from "next/link";
+import type { Metadata } from "next";
 
 export default function HomePage() {
   return (
@@ -13,4 +14,11 @@ export default function HomePage() {
       </p>
     </main>
   );
+}
+
+export async function generateMetadata(props: { params: Promise<{ slug: string }> }): Promise<Metadata> {
+  return {
+    title: "Home - Nontas Bak",
+    description: "Welcome to the personal website of Nontas Bakoulas",
+  };
 }
