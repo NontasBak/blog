@@ -1,0 +1,1 @@
+Convert this markdown file to an MDX document <file>. After reading through all of it, make an appropriate description. An example description is the following: "Exploiting SQL injection and password cracking for initial access, then analyzing a binary for privilege escalation". The description should include every exploitation method (usually seen from the headers)

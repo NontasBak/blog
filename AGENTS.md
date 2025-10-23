@@ -1,6 +1,6 @@
 If the user asks you to convert a markdown file to an MDX document for a blog post, you need to do the following:
 
-1. Convert any instance of `exegol-<container_name> /workspace # <command>` to `nontas@local$ <command>`
+1. Convert any instance of `exegol-<container_name> /workspace # <command>` to `nontas@local:~$ <command>`. If the user changes directories (meaning `/workspace` changes) change the directory accordingly.
 2. Convert any notes/warning/error block to a 
 ```
 <Callout title="Title" type="info">
@@ -9,7 +9,7 @@ content here
 ```
 don't add the 3 backticks, and make sure the "Callout" React component is written in separate lines, as above (not inline).
 Other available types are "warn" and "error".
-3. Change the path of the images to `/images/blog/<user_input>/<image_name>.png`. Change them to ![short title](image path). Give very vague descriptions of the image, no need to guess too hard. The `user_input` will be given to you.
+3. Change the path of the images to `/images/blog/<machine_name>/<image_name>.png`. Change them to ![short title](image path). Give very vague descriptions of the image, no need to guess too hard. The `machine_name` is seen from the title (make sure it's all lowercase, no dashes or underscores).
 4. The code/console blocks should have a short title, add it right next to ```console title="Title".
 For example:
 ```console title="Nmap scan"

