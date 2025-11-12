@@ -14,12 +14,12 @@ export default function Layout({ children }: LayoutProps<"/">) {
           // secondary items will be displayed differently on navbar
           secondary: false,
         },
-        {
-          icon: <LayoutTemplate />,
-          text: "Projects",
-          url: "/projects",
-          secondary: false,
-        },
+        // {
+        //   icon: <LayoutTemplate />,
+        //   text: "Projects",
+        //   url: "/projects",
+        //   secondary: false,
+        // },
         {
           icon: <User />,
           text: "About",
