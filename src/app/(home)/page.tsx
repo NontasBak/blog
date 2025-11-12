@@ -37,7 +37,7 @@ export default function HomePage() {
 
 export async function generateMetadata(): Promise<Metadata> {
   return {
-    title: "Home - Nontas Bak",
-    description: "Personal website of Epameinondas Bakoulas - Fullstack developer exploring infosec and AI",
+    title: "Home - Nontas Bakοulas",
+    description: "Personal website of Epameinondas Bakoulas",
   };
 }
